@@ -15,8 +15,6 @@
  * GNU General Public License for more details.
  */
 
-#include "platform.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -48,6 +46,10 @@ fdtype sp_fd = SER_INV_FD;
  *
  * On Linux there is a non-standard way to use arbitrary baud rates that we use if there is no
  * matching standard rate, see custom_baud.c
+ *
+ * On Darwin there is also a non-standard ioctl() to set arbitrary baud rates
+ * and any above 230400, see custom_baud_darwin.c and
+ * https://opensource.apple.com/source/IOSerialFamily/IOSerialFamily-91/tests/IOSerialTestLib.c.auto.html
  *
  * On Windows there exist similar macros (starting with CBR_ instead of B) but they are only defined for
  * backwards compatibility and the API supports arbitrary baud rates in the same manner as the macros, see
@@ -181,6 +183,7 @@ int serialport_config(fdtype fd, int baud)
 	}
 	msg_pdbg("Baud rate is %ld.\n", dcb.BaudRate);
 #else
+	int custom_baud = (baud >= 0 && use_custom_baud(baud, sp_baudtable));
 	struct termios wanted, observed;
 	if (tcgetattr(fd, &observed) != 0) {
 		msg_perr_strerror("Could not fetch original serial port configuration: ");
@@ -188,8 +191,8 @@ int serialport_config(fdtype fd, int baud)
 	}
 	wanted = observed;
 	if (baud >= 0) {
-		if (use_custom_baud(baud, sp_baudtable)) {
-			if (set_custom_baudrate(fd, baud)) {
+		if (custom_baud) {
+			if (set_custom_baudrate(fd, baud, BEFORE_FLAGS, NULL)) {
 				msg_perr_strerror("Could not set custom baudrate: ");
 				return 1;
 			}
@@ -200,7 +203,6 @@ int serialport_config(fdtype fd, int baud)
 				msg_perr_strerror("Could not fetch serial port configuration: ");
 				return 1;
 			}
-			msg_pdbg("Using custom baud rate.\n");
 		} else {
 			const struct baudentry *entry = round_baud(baud);
 			if (cfsetispeed(&wanted, entry->flag) != 0 || cfsetospeed(&wanted, entry->flag) != 0) {
@@ -214,6 +216,10 @@ int serialport_config(fdtype fd, int baud)
 	wanted.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG | IEXTEN);
 	wanted.c_iflag &= ~(IXON | IXOFF | IXANY | ICRNL | IGNCR | INLCR);
 	wanted.c_oflag &= ~OPOST;
+	if (custom_baud && set_custom_baudrate(fd, baud, WITH_FLAGS, &wanted)) {
+		msg_perr_strerror("Could not set custom baudrate: ");
+		return 1;
+	}
 	if (tcsetattr(fd, TCSANOW, &wanted) != 0) {
 		msg_perr_strerror("Could not change serial port configuration: ");
 		return 1;
@@ -237,6 +243,13 @@ int serialport_config(fdtype fd, int baud)
 			 (long)observed.c_iflag, (long)wanted.c_iflag,
 			 (long)observed.c_oflag, (long)wanted.c_oflag
 			);
+	}
+	if (custom_baud) {
+		if (set_custom_baudrate(fd, baud, AFTER_FLAGS, &wanted)) {
+			msg_perr_strerror("Could not set custom baudrate: ");
+			return 1;
+		}
+		msg_pdbg("Using custom baud rate.\n");
 	}
 	if (cfgetispeed(&observed) != cfgetispeed(&wanted) ||
 	    cfgetospeed(&observed) != cfgetospeed(&wanted)) {
@@ -405,7 +418,7 @@ int serialport_write(const unsigned char *buf, unsigned int writecnt)
 		if (!tmp) {
 			msg_pdbg2("Empty write\n");
 			empty_writes--;
-			internal_delay(500);
+			default_delay(500);
 			if (empty_writes == 0) {
 				msg_perr("Serial port is unresponsive!\n");
 				return 1;
@@ -512,7 +525,7 @@ int serialport_read_nonblock(unsigned char *c, unsigned int readcnt, unsigned in
 			ret = 0;
 			break;
 		}
-		internal_delay(1000);	/* 1ms units */
+		default_delay(1000);	/* 1ms units */
 	}
 	if (really_read != NULL)
 		*really_read = rd_bytes;
@@ -598,7 +611,7 @@ int serialport_write_nonblock(const unsigned char *buf, unsigned int writecnt, u
 				break;
 			}
 		}
-		internal_delay(1000);	/* 1ms units */
+		default_delay(1000);	/* 1ms units */
 	}
 	if (really_wrote != NULL)
 		*really_wrote = wr_bytes;

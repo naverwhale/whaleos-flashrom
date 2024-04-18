@@ -14,12 +14,11 @@
  * GNU General Public License for more details.
  */
 
-#if defined(__i386__) || defined(__x86_64__)
-
 #include <stdlib.h>
 #include "flash.h"
 #include "programmer.h"
-#include "hwaccess.h"
+#include "hwaccess_x86_io.h"
+#include "platform/pci.h"
 
 #define PCI_VENDOR_ID_REALTEK	0x10ec
 #define PCI_VENDOR_ID_SMC1211	0x1113
@@ -87,18 +86,12 @@ static int nicrealtek_shutdown(void *data)
 }
 
 static const struct par_master par_master_nicrealtek = {
-		.chip_readb		= nicrealtek_chip_readb,
-		.chip_readw		= fallback_chip_readw,
-		.chip_readl		= fallback_chip_readl,
-		.chip_readn		= fallback_chip_readn,
-		.chip_writeb		= nicrealtek_chip_writeb,
-		.chip_writew		= fallback_chip_writew,
-		.chip_writel		= fallback_chip_writel,
-		.chip_writen		= fallback_chip_writen,
-		.shutdown		= nicrealtek_shutdown,
+	.chip_readb	= nicrealtek_chip_readb,
+	.chip_writeb	= nicrealtek_chip_writeb,
+	.shutdown	= nicrealtek_shutdown,
 };
 
-static int nicrealtek_init(void)
+static int nicrealtek_init(const struct programmer_cfg *cfg)
 {
 	struct pci_dev *dev = NULL;
 	uint32_t io_base_addr = 0;
@@ -108,7 +101,7 @@ static int nicrealtek_init(void)
 	if (rget_io_perms())
 		return 1;
 
-	dev = pcidev_init(nics_realtek, PCI_BASE_ADDRESS_0);
+	dev = pcidev_init(cfg, nics_realtek, PCI_BASE_ADDRESS_0);
 	if (!dev)
 		return 1;
 
@@ -147,11 +140,4 @@ const struct programmer_entry programmer_nicrealtek = {
 	.type			= PCI,
 	.devs.dev		= nics_realtek,
 	.init			= nicrealtek_init,
-	.map_flash_region	= fallback_map,
-	.unmap_flash_region	= fallback_unmap,
-	.delay			= internal_delay,
 };
-
-#else
-#error PCI port I/O access is not supported on this architecture yet.
-#endif

@@ -12,9 +12,16 @@
 #include "chipdrivers.h"
 #include "flash.h"
 #include "layout.h"
-#include "platform.h"
 #include "programmer.h"
 
+/**
+ * action_descriptor is DEPRECATED !
+ * Allow for easy toggling off for the eventual removal from the tree.
+ *
+ * TRUE  := action_descriptor is not used.
+ * FALSE := action_descriptor is used on Intel.
+ */
+static bool deprecate_ad = false;
 
 /*
  * This global variable is used to communicate the type of ICH found on the
@@ -120,10 +127,13 @@ static void fix_erasers_if_needed(struct flashchip *chip,
 {
 	int i;
 
+	if (deprecate_ad)
+		return;
+
 	/* Need to copy no matter what. */
 	*chip = *flash->chip;
 
-#if IS_X86
+#if ((defined (__i386__) || defined (__x86_64__) || defined(__amd64__))) && CONFIG_INTERNAL
 	/*
 	 * ich_generation is set to the chipset type when running on an x86
 	 * device, even when flashrom was invoked to program the EC.
@@ -147,18 +157,17 @@ static void fix_erasers_if_needed(struct flashchip *chip,
 	 */
 	dry_run = true;
 	for (i = 0; i < NUM_ERASEFUNCTIONS; i++) {
-
+		erasefunc_t *erase_func = lookup_erase_func_ptr(&chip->block_erasers[i]);
 		/* Assume it is not allowed. */
-		if (!chip->block_erasers[i].block_erase)
+		if (!erase_func)
 			continue;
 
-		if (!chip->block_erasers[i].block_erase
-		    (flash, 0, flash->chip->total_size * 1024)) {
+		if (!erase_func(flash, 0, flash->chip->total_size * 1024)) {
 			msg_pdbg("%s: kept eraser at %d\n",  __func__, i);
 			continue;
 		}
 
-		chip->block_erasers[i].block_erase = NULL;
+		chip->block_erasers[i].block_erase = NO_BLOCK_ERASE_FUNC;
 	}
 	dry_run = false;
 }
@@ -636,26 +645,6 @@ static void fill_action_descriptor(struct action_descriptor *descriptor,
 	descriptor->processing_units[pu_index].num_blocks = 0;
 }
 
-/*
- * In case layout is used, return the largest offset of the end of all
- * included sections. If layout is not used, return zero.
- */
-static size_t top_section_offset(const struct flashrom_layout *layout)
-{
-	size_t top = 0;
-
-	const struct romentry *entry = NULL;
-	while ((entry = layout_next(layout, entry))) {
-		if (!entry->included)
-			continue;
-
-		if (entry->end > top)
-			top = entry->end;
-	}
-
-	return top;
-}
-
 bool is_dry_run(void)
 {
 	return dry_run;
@@ -663,8 +652,7 @@ bool is_dry_run(void)
 
 struct action_descriptor *prepare_action_descriptor(struct flashctx *flash,
 						    void *oldcontents,
-						    void *newcontents,
-						    int do_diff)
+						    void *newcontents)
 {
 	struct eraser sorted_erasers[NUM_ERASEFUNCTIONS];
 	size_t i;
@@ -681,29 +669,14 @@ struct action_descriptor *prepare_action_descriptor(struct flashctx *flash,
 	 * operate only on part of the chip starting at offset zero.
 	 *
 	 * Not an efficient way to do it, but this is acceptable on the host.
+	 *
+	 * Look for the largest offset where the difference is, this is the
+	 * highest offset which might need to be erased.
 	 */
-	if (do_diff) {
-		/*
-		 * If we are doing diffs, look for the largest offset where
-		 * the difference is, this is the highest offset which might
-		 * need to be erased.
-		 */
-		for (i = 0; i < chip_size; i++)
-			if (((uint8_t *)newcontents)[i] !=
-			    ((uint8_t *)oldcontents)[i])
-				block_size = i + 1;
-	} else {
-		/*
-		 * We are not doing diffs, if user specified sections to
-		 * program - use the highest offset of the highest section as
-		 * the limit.
-		 */
-		block_size = top_section_offset(get_layout(flash));
-
-		if (!block_size)
-			/* User did not specify any sections. */
-			block_size = chip_size;
-	}
+	for (i = 0; i < chip_size; i++)
+		if (((uint8_t *)newcontents)[i] !=
+		    ((uint8_t *)oldcontents)[i])
+			block_size = i + 1;
 
 	num_erasers = fill_sorted_erasers(flash, block_size, sorted_erasers);
 
@@ -715,7 +688,7 @@ struct action_descriptor *prepare_action_descriptor(struct flashctx *flash,
 	block_size = flash->chip->block_erasers
 		[sorted_erasers[0].eraser_index].eraseblocks
 		[sorted_erasers[0].region_index].size;
-	max_units = chip_size / (2 * block_size) + 1;
+	max_units = max( chip_size / (2 * block_size), 1 ) + 1;
 	descriptor = malloc(sizeof(struct action_descriptor) +
 			    sizeof(struct processing_unit) * max_units);
 	if (!descriptor) {

@@ -19,15 +19,15 @@
  * Contains the ITE IT87* SPI specific routines
  */
 
-#if defined(__i386__) || defined(__x86_64__)
-
 #include <string.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <errno.h>
 #include "flash.h"
 #include "chipdrivers.h"
 #include "programmer.h"
-#include "hwaccess.h"
+#include "hwaccess_physmap.h"
+#include "hwaccess_x86_io.h"
 #include "spi.h"
 
 #define ITE_SUPERIO_PORT1	0x2e
@@ -40,7 +40,7 @@
 struct it8716f_spi_data {
 	uint16_t flashport;
 	/* use fast 33MHz SPI (<>0) or slow 16MHz (0) */
-	int fast_spi;
+	bool fast_spi;
 };
 
 static int get_data_from_context(const struct flashctx *flash, struct it8716f_spi_data **data)
@@ -134,9 +134,20 @@ static int it8716f_spi_page_program(struct flashctx *flash, const uint8_t *buf, 
 	OUTB(0, data->flashport);
 	/* Wait until the Write-In-Progress bit is cleared.
 	 * This usually takes 1-10 ms, so wait in 1 ms steps.
+	 *
+	 * FIXME: This should timeout after some number of retries.
 	 */
-	while (spi_read_status_register(flash) & SPI_SR_WIP)
-		programmer_delay(1000);
+	while (true) {
+		uint8_t status;
+		int ret = spi_read_register(flash, STATUS1, &status);
+		if (ret)
+		       return ret;
+
+		if((status & SPI_SR_WIP) == 0)
+			return 0;
+
+		default_delay(1000);
+	}
 	return 0;
 }
 
@@ -232,7 +243,7 @@ static int it8716f_spi_chip_read(struct flashctx *flash, uint8_t *buf,
 	if (get_data_from_context(flash, &data) < 0)
 		return SPI_GENERIC_ERROR;
 
-	data->fast_spi = 0;
+	data->fast_spi = false;
 
 	/* FIXME: Check if someone explicitly requested to use IT87 SPI although
 	 * the mainboard does not use IT87 SPI translation. This should be done
@@ -278,7 +289,10 @@ static int it8716f_spi_chip_write_256(struct flashctx *flash, const uint8_t *buf
 		}
 
 		while (len >= chip->page_size) {
-			it8716f_spi_page_program(flash, buf, start);
+			int ret = it8716f_spi_page_program(flash, buf, start);
+			if (ret)
+				return ret;
+			update_progress(flash, FLASHROM_PROGRESS_WRITE, chip->page_size - len, chip->page_size);
 			start += chip->page_size;
 			len -= chip->page_size;
 			buf += chip->page_size;
@@ -300,21 +314,22 @@ static const struct spi_master spi_master_it87xx = {
 	.max_data_read	= 3,
 	.max_data_write	= MAX_DATA_UNSPECIFIED,
 	.command	= it8716f_spi_send_command,
-	.multicommand	= default_spi_send_multicommand,
+	.map_flash_region	= physmap,
+	.unmap_flash_region	= physunmap,
 	.read		= it8716f_spi_chip_read,
 	.write_256	= it8716f_spi_chip_write_256,
 	.write_aai	= spi_chip_write_1,
 	.shutdown	= it8716f_shutdown,
 };
 
-static uint16_t it87spi_probe(uint16_t port)
+static uint16_t it87spi_probe(const struct programmer_cfg *cfg, uint16_t port)
 {
 	uint8_t tmp = 0;
 	uint16_t flashport = 0;
 
 	enter_conf_mode_ite(port);
 
-	char *param = extract_programmer_param("dualbiosindex");
+	char *param = extract_programmer_param_str(cfg, "dualbiosindex");
 	if (param != NULL) {
 		sio_write(port, 0x07, 0x07); /* Select GPIO LDN */
 		tmp = sio_read(port, 0xEF);
@@ -352,7 +367,7 @@ static uint16_t it87spi_probe(uint16_t port)
 		msg_pdbg("No IT87* serial flash segment enabled.\n");
 		exit_conf_mode_ite(port);
 		/* Nothing to do. */
-		return 1;
+		return 0;
 	}
 	msg_pdbg("Serial flash segment 0x%08x-0x%08x %sabled\n",
 		 0xFFFE0000, 0xFFFFFFFF, (tmp & 1 << 1) ? "en" : "dis");
@@ -380,7 +395,7 @@ static uint16_t it87spi_probe(uint16_t port)
 	flashport |= sio_read(port, 0x65);
 	msg_pdbg("Serial flash port 0x%04x\n", flashport);
 	/* Non-default port requested? */
-	param = extract_programmer_param("it87spiport");
+	param = extract_programmer_param_str(cfg, "it87spiport");
 	if (param) {
 		char *endptr = NULL;
 		unsigned long forced_flashport;
@@ -418,7 +433,7 @@ static uint16_t it87spi_probe(uint16_t port)
 	}
 
 	data->flashport = flashport;
-	data->fast_spi = 1;
+	data->fast_spi = true;
 
 	if (internal_buses_supported & BUS_SPI)
 		msg_pdbg("Overriding chipset SPI with IT87 SPI.\n");
@@ -426,61 +441,30 @@ static uint16_t it87spi_probe(uint16_t port)
 	return register_spi_master(&spi_master_it87xx, data);
 }
 
-int init_superio_ite(void)
+int init_superio_ite(const struct programmer_cfg *cfg)
 {
 	int i;
 	int ret = 0;
-	int chips_found = 0;
 
 	for (i = 0; i < superio_count; i++) {
 		if (superios[i].vendor != SUPERIO_VENDOR_ITE)
 			continue;
 
 		switch (superios[i].model) {
-		case 0x8500:
-		case 0x8502:
-		case 0x8510:
-		case 0x8511:
-		case 0x8512:
-			/* FIXME: This should be enabled, but we need a check
-			 * for laptop whitelisting due to the amount of things
-			 * which can go wrong if the EC firmware does not
-			 * implement the interface we want.
-			 */
-			if (!it85xx_spi_init(superios[i]))
-				chips_found++;
-			break;
-		case 0x8518:
-			if (!it8518_spi_init(superios[i]))
-				chips_found++;
-			break;
 		case 0x8705:
-			if (!it8705f_write_enable(superios[i].port))
-				chips_found++;
+			ret |= it8705f_write_enable(superios[i].port);
 			break;
+		case 0x8686:
 		case 0x8716:
 		case 0x8718:
 		case 0x8720:
 		case 0x8728:
-			if (!it87spi_probe(superios[i].port))
-				chips_found++;
+			ret |= it87spi_probe(cfg, superios[i].port);
 			break;
 		default:
 			msg_pdbg2("Super I/O ID 0x%04hx is not on the list of flash-capable controllers.\n",
 				  superios[i].model);
 		}
 	}
-
-	if (chips_found == 0) {
-		ret = 1;	/* failed to probe/initialize/enable chip */
-	} else if (chips_found == 1) {
-		ret = 0;	/* success */
-	} else {
-		msg_pdbg("%s: Found %d programmable ECs/SuperIOs, aborting.\n",
-				__func__, chips_found);
-		ret = 1;
-	}
 	return ret;
 }
-
-#endif /* defined(__i386__) || defined(__x86_64__) */

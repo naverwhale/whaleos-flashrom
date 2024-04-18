@@ -115,7 +115,10 @@ enum spi_nss_level {
 #define USB_TIMEOUT_IN_MS					5000
 
 static const struct dev_entry devs_stlinkv3_spi[] = {
-	{0x0483, 0x374F, OK, "STMicroelectronics", "STLINK-V3"},
+	{0x0483, 0x374E, NT, "STMicroelectronics", "STLINK-V3E"},
+	{0x0483, 0x374F, OK, "STMicroelectronics", "STLINK-V3S"},
+	{0x0483, 0x3753, OK, "STMicroelectronics", "STLINK-V3 dual VCP"},
+	{0x0483, 0x3754, NT, "STMicroelectronics", "STLINK-V3 no MSD"},
 	{0}
 };
 
@@ -411,7 +414,7 @@ static int stlinkv3_spi_transmit(const struct flashctx *flash,
 					  &actual_length,
 					  USB_TIMEOUT_IN_MS);
 		if (rc != LIBUSB_TRANSFER_COMPLETED || (unsigned int)actual_length != read_cnt) {
-			msg_perr("Failed to retrive the STLINK_BRIDGE_READ_SPI answer: '%s'\n",
+			msg_perr("Failed to retrieve the STLINK_BRIDGE_READ_SPI answer: '%s'\n",
 				 libusb_error_name(rc));
 			goto transmit_err;
 		}
@@ -460,64 +463,69 @@ static int stlinkv3_spi_shutdown(void *data)
 }
 
 static const struct spi_master spi_programmer_stlinkv3 = {
-	.max_data_read = UINT16_MAX,
-	.max_data_write = UINT16_MAX,
-	.command = stlinkv3_spi_transmit,
-	.multicommand = default_spi_send_multicommand,
-	.read = default_spi_read,
-	.write_256 = default_spi_write_256,
-	.write_aai = default_spi_write_aai,
-	.shutdown = stlinkv3_spi_shutdown,
+	.max_data_read	= UINT16_MAX,
+	.max_data_write	= UINT16_MAX,
+	.command	= stlinkv3_spi_transmit,
+	.read		= default_spi_read,
+	.write_256	= default_spi_write_256,
+	.shutdown	= stlinkv3_spi_shutdown,
 };
 
-static int stlinkv3_spi_init(void)
+static int stlinkv3_spi_init(const struct programmer_cfg *cfg)
 {
 	uint16_t sck_freq_kHz = 1000;	// selecting 1 MHz SCK is a good bet
-	char *speed_str = NULL;
-	char *serialno = NULL;
+	char *param_str;
 	char *endptr = NULL;
 	int ret = 1;
+	int devIndex = 0;
 	struct libusb_context *usb_ctx;
-	libusb_device_handle *stlinkv3_handle;
+	/* Initialize stlinkv3_handle to NULL for suppressing scan-build false positive core.uninitialized.Branch */
+	libusb_device_handle *stlinkv3_handle = NULL;
 	struct stlinkv3_spi_data *stlinkv3_data;
 
-	libusb_init(&usb_ctx);
-	if (!usb_ctx) {
+	if (libusb_init(&usb_ctx)) {
 		msg_perr("Could not initialize libusb!\n");
 		return 1;
 	}
 
-	serialno = extract_programmer_param("serial");
-	if (serialno)
-		msg_pdbg("Opening STLINK-V3 with serial: %s\n", serialno);
-	stlinkv3_handle = usb_dev_get_by_vid_pid_serial(usb_ctx,
-							devs_stlinkv3_spi[0].vendor_id,
-							devs_stlinkv3_spi[0].device_id,
-							serialno);
+	param_str = extract_programmer_param_str(cfg, "serial");
+	if (param_str)
+		msg_pdbg("Opening STLINK-V3 with serial: %s\n", param_str);
+
+
+	while (devs_stlinkv3_spi[devIndex].vendor_id != 0) {
+		stlinkv3_handle = usb_dev_get_by_vid_pid_serial(usb_ctx,
+								devs_stlinkv3_spi[devIndex].vendor_id,
+								devs_stlinkv3_spi[devIndex].device_id,
+								param_str);
+		if (stlinkv3_handle)
+			break;
+		devIndex++;
+	}
 
 	if (!stlinkv3_handle) {
-		if (serialno)
-			msg_perr("No STLINK-V3 seems to be connected with serial %s\n", serialno);
+		if (param_str)
+			msg_perr("No STLINK-V3 seems to be connected with serial %s\n", param_str);
 		else
 			msg_perr("Could not find any connected STLINK-V3\n");
-		free(serialno);
+		free(param_str);
 		goto init_err_exit;
 	}
-	free(serialno);
+	free(param_str);
 
-	speed_str = extract_programmer_param("spispeed");
-	if (speed_str) {
-		sck_freq_kHz = strtoul(speed_str, &endptr, 0);
+	param_str = extract_programmer_param_str(cfg, "spispeed");
+	if (param_str) {
+		sck_freq_kHz = strtoul(param_str, &endptr, 0);
 		if (*endptr || sck_freq_kHz == 0) {
 			msg_perr("The spispeed parameter passed with invalid format: %s\n",
-				 speed_str);
+				 param_str);
 			msg_perr("Please pass the parameter "
 				 "with a simple non-zero number in kHz\n");
-			free(speed_str);
+			free(param_str);
 			ret = -1;
 			goto init_err_exit;
 		}
-		free(speed_str);
+		free(param_str);
 	}
 
 	if (stlinkv3_spi_open(sck_freq_kHz, stlinkv3_handle))
@@ -546,7 +554,4 @@ const struct programmer_entry programmer_stlinkv3_spi = {
 	.type			= USB,
 	.devs.dev		= devs_stlinkv3_spi,
 	.init			= stlinkv3_spi_init,
-	.map_flash_region	= fallback_map,
-	.unmap_flash_region	= fallback_unmap,
-	.delay			= internal_delay,
 };

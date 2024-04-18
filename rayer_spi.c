@@ -22,14 +22,13 @@
  * most OS parport drivers will perform many unnecessary accesses although
  * this driver just treats the parallel port as a GPIO set.
  */
-#if defined(__i386__) || defined(__x86_64__)
 
 #include <stdlib.h>
 #include <strings.h>
 #include <string.h>
 #include "flash.h"
 #include "programmer.h"
-#include "hwaccess.h"
+#include "hwaccess_x86_io.h"
 
 /* We have two sets of pins, out and in. The numbers for both sets are
  * independent and are bitshift values, not real pin numbers.
@@ -175,16 +174,6 @@ static const struct rayer_pinout spi_tt = {
 	.miso_bit = 7,
 };
 
-static const struct rayer_programmer rayer_spi_types[] = {
-	{"rayer",		NT,	"RayeR SPIPGM",					&rayer_spipgm},
-	{"xilinx",		NT,	"Xilinx Parallel Cable III (DLC 5)",		&xilinx_dlc5},
-	{"byteblastermv",	OK,	"Altera ByteBlasterMV",				&altera_byteblastermv},
-	{"stk200",		NT,	"Atmel STK200/300 adapter",			&atmel_stk200},
-	{"wiggler",		OK,	"Wiggler LPT",					&wiggler_lpt},
-	{"spi_tt",		NT,	"SPI Tiny Tools (SPI_TT LPT)",			&spi_tt},
-	{0},
-};
-
 static void rayer_bitbang_set_cs(int val, void *spi_data)
 {
 	struct rayer_spi_data *data = spi_data;
@@ -229,27 +218,55 @@ static int rayer_shutdown(void *spi_data)
 }
 
 static const struct bitbang_spi_master bitbang_spi_master_rayer = {
-	.set_cs = rayer_bitbang_set_cs,
-	.set_sck = rayer_bitbang_set_sck,
-	.set_mosi = rayer_bitbang_set_mosi,
-	.get_miso = rayer_bitbang_get_miso,
-	.half_period = 0,
+	.set_cs		= rayer_bitbang_set_cs,
+	.set_sck	= rayer_bitbang_set_sck,
+	.set_mosi	= rayer_bitbang_set_mosi,
+	.get_miso	= rayer_bitbang_get_miso,
+	.half_period	= 0,
 };
 
-static int rayer_spi_init(void)
+static const struct rayer_programmer *find_progtype(const char *prog_type)
 {
+	static const struct rayer_programmer rayer_spi_types[] = {
+		{"rayer",		NT,	"RayeR SPIPGM",					&rayer_spipgm},
+		{"xilinx",		NT,	"Xilinx Parallel Cable III (DLC 5)",		&xilinx_dlc5},
+		{"byteblastermv",	OK,	"Altera ByteBlasterMV",				&altera_byteblastermv},
+		{"stk200",		NT,	"Atmel STK200/300 adapter",			&atmel_stk200},
+		{"wiggler",		OK,	"Wiggler LPT",					&wiggler_lpt},
+		{"spi_tt",		NT,	"SPI Tiny Tools (SPI_TT LPT)",			&spi_tt},
+		{0},
+	};
+	if (!prog_type)
+		return &rayer_spi_types[0];
+
 	const struct rayer_programmer *prog = rayer_spi_types;
-	char *arg = NULL;
-	struct rayer_pinout *pinout = NULL;
-	uint16_t lpt_iobase;
-	uint8_t lpt_outbyte;
+	for (; prog->type != NULL; prog++) {
+		if (strcasecmp(prog_type, prog->type) == 0) {
+			break;
+		}
+	}
+
+	if (!prog->type) {
+		msg_perr("Error: Invalid device type specified.\n");
+		return NULL;
+	}
+
+	return prog;
+}
+
+static int get_params(const struct programmer_cfg *cfg, uint16_t *lpt_iobase,
+		      const struct rayer_programmer **prog)
+{
+	/* Pick a default value for the I/O base. */
+	*lpt_iobase = 0x378;
+	/* no programmer type specified. */
+	*prog = NULL;
 
 	/* Non-default port requested? */
-	arg = extract_programmer_param("iobase");
+	char *arg = extract_programmer_param_str(cfg, "iobase");
 	if (arg) {
 		char *endptr = NULL;
-		unsigned long tmp;
-		tmp = strtoul(arg, &endptr, 0);
+		unsigned long tmp = strtoul(arg, &endptr, 0);
 		/* Port 0, port >0x10000, unaligned ports and garbage strings
 		 * are rejected.
 		 */
@@ -263,43 +280,39 @@ static int rayer_spi_init(void)
 				 "given was invalid.\nIt must be a multiple of "
 				 "0x4 and lie between 0x100 and 0xfffc.\n");
 			free(arg);
-			return 1;
+			return -1;
 		} else {
-			lpt_iobase = (uint16_t)tmp;
+			*lpt_iobase = (uint16_t)tmp;
 			msg_pinfo("Non-default I/O base requested. This will "
 				  "not change the hardware settings.\n");
 		}
-	} else {
-		/* Pick a default value for the I/O base. */
-		lpt_iobase = 0x378;
+		free(arg);
 	}
+
+	arg = extract_programmer_param_str(cfg, "type");
+	*prog = find_progtype(arg);
 	free(arg);
+
+	return *prog ? 0 : -1;
+}
+
+static int rayer_spi_init(const struct programmer_cfg *cfg)
+{
+	const struct rayer_programmer *prog;
+	struct rayer_pinout *pinout = NULL;
+	uint16_t lpt_iobase;
+
+	if (get_params(cfg, &lpt_iobase, &prog) < 0)
+		return 1;
 
 	msg_pdbg("Using address 0x%x as I/O base for parallel port access.\n",
 		 lpt_iobase);
 
-	arg = extract_programmer_param("type");
-	if (arg) {
-		for (; prog->type != NULL; prog++) {
-			if (strcasecmp(arg, prog->type) == 0) {
-				break;
-			}
-		}
-		if (prog->type == NULL) {
-			msg_perr("Error: Invalid device type specified.\n");
-			free(arg);
-			return 1;
-		}
-		free(arg);
-	}
 	msg_pinfo("Using %s pinout.\n", prog->description);
 	pinout = (struct rayer_pinout *)prog->dev_data;
 
 	if (rget_io_perms())
 		return 1;
-
-	/* Get the initial value before writing to any line. */
-	lpt_outbyte = INB(lpt_iobase);
 
 	struct rayer_spi_data *data = calloc(1, sizeof(*data));
 	if (!data) {
@@ -308,7 +321,8 @@ static int rayer_spi_init(void)
 	}
 	data->pinout = pinout;
 	data->lpt_iobase = lpt_iobase;
-	data->lpt_outbyte = lpt_outbyte;
+	/* Get the initial value before writing to any line. */
+	data->lpt_outbyte = INB(lpt_iobase);
 
 	if (pinout->shutdown)
 		register_shutdown(pinout->shutdown, data);
@@ -330,11 +344,4 @@ const struct programmer_entry programmer_rayer_spi = {
 				/* FIXME */
 	.devs.note		= "RayeR parallel port programmer\n",
 	.init			= rayer_spi_init,
-	.map_flash_region	= fallback_map,
-	.unmap_flash_region	= fallback_unmap,
-	.delay			= internal_delay,
 };
-
-#else
-#error PCI port I/O access is not supported on this architecture yet.
-#endif

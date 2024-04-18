@@ -20,7 +20,7 @@
 #include <string.h>
 #include "flash.h"
 #include "programmer.h"
-#include "hwaccess.h"
+#include "platform/pci.h"
 
 #define PCI_VENDOR_ID_VIA	0x1106
 
@@ -46,7 +46,7 @@
 /* Select the byte we want to access. This is done by clearing the bit corresponding to the byte we want to
  * access, leaving the others set (yes, really). */
 #define ENABLE_BYTE(address)	((~(1 << ((address) & 3))) & BROM_BYTE_ENABLE_MASK)
-#define BYTE_OFFSET(address)	(((addr) & 3) * 8)
+#define BYTE_OFFSET(address)	(((address) & 3) * 8)
 
 static const struct dev_entry ata_via[] = {
 	{PCI_VENDOR_ID_VIA, 0x3249, DEP, "VIA", "VT6421A"},
@@ -90,7 +90,7 @@ static bool atavia_ready(struct pci_dev *pcidev_dev)
 			ready = true;
 			break;
 		} else {
-			programmer_delay(1);
+			default_delay(1);
 			continue;
 		}
 	}
@@ -133,48 +133,40 @@ static uint8_t atavia_chip_readb(const struct flashctx *flash, const chipaddr ad
 }
 
 static const struct par_master lpc_master_atavia = {
-		.chip_readb		= atavia_chip_readb,
-		.chip_readw		= fallback_chip_readw,
-		.chip_readl		= fallback_chip_readl,
-		.chip_readn		= fallback_chip_readn,
-		.chip_writeb		= atavia_chip_writeb,
-		.chip_writew		= fallback_chip_writew,
-		.chip_writel		= fallback_chip_writel,
-		.chip_writen		= fallback_chip_writen,
+	.map_flash_region	= atavia_map,
+	.chip_readb	= atavia_chip_readb,
+	.chip_writeb	= atavia_chip_writeb,
 };
 
-static int atavia_init(void)
+static int atavia_init(const struct programmer_cfg *cfg)
 {
-	char *arg = extract_programmer_param("offset");
+	char *arg = extract_programmer_param_str(cfg, "offset");
 	if (arg) {
 		if (strlen(arg) == 0) {
 			msg_perr("Missing argument for offset.\n");
 			free(arg);
-			return ERROR_FATAL;
+			return ERROR_FLASHROM_FATAL;
 		}
 		char *endptr;
 		atavia_offset = (void *)strtoul(arg, &endptr, 0);
 		if (*endptr) {
 			msg_perr("Error: Invalid offset specified: \"%s\".\n", arg);
 			free(arg);
-			return ERROR_FATAL;
+			return ERROR_FLASHROM_FATAL;
 		}
 		msg_pinfo("Mapping addresses to base %p.\n", atavia_offset);
 	}
 	free(arg);
 
-	if (rget_io_perms())
-		return 1;
-
-	dev = pcidev_init(ata_via, PCI_ROM_ADDRESS); /* Actually no BAR setup needed at all. */
+	dev = pcidev_init(cfg, ata_via, PCI_ROM_ADDRESS); /* Actually no BAR setup needed at all. */
 	if (!dev)
 		return 1;
 
 	/* Test if a flash chip is attached. */
 	pci_write_long(dev, PCI_ROM_ADDRESS, (uint32_t)PCI_ROM_ADDRESS_MASK);
-	programmer_delay(90);
+	default_delay(90);
 	uint32_t base = pci_read_long(dev, PCI_ROM_ADDRESS);
-	msg_pdbg2("BROM base=0x%08x\n", base);
+	msg_pdbg2("BROM base=0x%08"PRIx32"\n", base);
 	if ((base & PCI_ROM_ADDRESS_MASK) == 0) {
 		msg_pwarn("Controller thinks there is no ROM attached.\n");
 	}
@@ -192,7 +184,4 @@ const struct programmer_entry programmer_atavia = {
 	.type			= PCI,
 	.devs.dev		= ata_via,
 	.init			= atavia_init,
-	.map_flash_region	= atavia_map,
-	.unmap_flash_region	= fallback_unmap,
-	.delay			= internal_delay,
 };

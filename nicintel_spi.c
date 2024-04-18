@@ -34,7 +34,8 @@
 #include <unistd.h>
 #include "flash.h"
 #include "programmer.h"
-#include "hwaccess.h"
+#include "hwaccess_physmap.h"
+#include "platform/pci.h"
 
 #define PCI_VENDOR_ID_INTEL 0x8086
 #define MEMMAP_SIZE getpagesize()
@@ -72,8 +73,6 @@
 /* Currently unused */
 // #define FL_BUSY	30
 // #define FL_ER	31
-
-#define BIT(x) (1<<(x))
 
 struct nicintel_spi_data {
 	uint8_t *spibar;
@@ -165,6 +164,19 @@ static void nicintel_bitbang_set_mosi(int val, void *spi_data)
 	pci_mmio_writel(tmp, data->spibar + FLA);
 }
 
+static void nicintel_bitbang_set_sck_set_mosi(int sck, int mosi, void *spi_data)
+{
+	struct nicintel_spi_data *data = spi_data;
+	uint32_t tmp;
+
+	tmp = pci_mmio_readl(data->spibar + FLA);
+	tmp &= ~BIT(FL_SCK);
+	tmp &= ~BIT(FL_SI);
+	tmp |= (sck << FL_SCK);
+	tmp |= (mosi << FL_SI);
+	pci_mmio_writel(tmp, data->spibar + FLA);
+}
+
 static int nicintel_bitbang_get_miso(void *spi_data)
 {
 	struct nicintel_spi_data *data = spi_data;
@@ -175,14 +187,28 @@ static int nicintel_bitbang_get_miso(void *spi_data)
 	return tmp;
 }
 
+static int nicintel_bitbang_set_sck_get_miso(int sck, void *spi_data)
+{
+	struct nicintel_spi_data *data = spi_data;
+	uint32_t tmp;
+
+	tmp = pci_mmio_readl(data->spibar + FLA);
+	tmp &= ~BIT(FL_SCK);
+	tmp |= (sck << FL_SCK);
+	pci_mmio_writel(tmp, data->spibar + FLA);
+	return (tmp >> FL_SO) & 0x1;
+}
+
 static const struct bitbang_spi_master bitbang_spi_master_nicintel = {
-	.set_cs = nicintel_bitbang_set_cs,
-	.set_sck = nicintel_bitbang_set_sck,
-	.set_mosi = nicintel_bitbang_set_mosi,
-	.get_miso = nicintel_bitbang_get_miso,
-	.request_bus = nicintel_request_spibus,
-	.release_bus = nicintel_release_spibus,
-	.half_period = 1,
+	.set_cs			= nicintel_bitbang_set_cs,
+	.set_sck		= nicintel_bitbang_set_sck,
+	.set_mosi		= nicintel_bitbang_set_mosi,
+	.set_sck_set_mosi	= nicintel_bitbang_set_sck_set_mosi,
+	.set_sck_get_miso	= nicintel_bitbang_set_sck_get_miso,
+	.get_miso		= nicintel_bitbang_get_miso,
+	.request_bus		= nicintel_request_spibus,
+	.release_bus		= nicintel_release_spibus,
+	.half_period		= 1,
 };
 
 static int nicintel_spi_shutdown(void *spi_data)
@@ -259,14 +285,11 @@ static int nicintel_spi_i210_enable_flash(struct nicintel_spi_data *data)
 	return 0;
 }
 
-static int nicintel_spi_init(void)
+static int nicintel_spi_init(const struct programmer_cfg *cfg)
 {
 	struct pci_dev *dev = NULL;
 
-	if (rget_io_perms())
-		return 1;
-
-	dev = pcidev_init(nics_intel_spi, PCI_BASE_ADDRESS_0);
+	dev = pcidev_init(cfg, nics_intel_spi, PCI_BASE_ADDRESS_0);
 	if (!dev)
 		return 1;
 
@@ -314,7 +337,4 @@ const struct programmer_entry programmer_nicintel_spi = {
 	.type			= PCI,
 	.devs.dev		= nics_intel_spi,
 	.init			= nicintel_spi_init,
-	.map_flash_region	= fallback_map,
-	.unmap_flash_region	= fallback_unmap,
-	.delay			= internal_delay,
 };

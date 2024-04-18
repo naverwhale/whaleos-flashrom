@@ -17,9 +17,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <inttypes.h>
-#include <libgen.h>
-#include <limits.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <mtd/mtd-user.h>
@@ -30,23 +28,20 @@
 
 #include "flash.h"
 #include "programmer.h"
-#include "writeprotect.h"
 
 #define LINUX_DEV_ROOT			"/dev"
 #define LINUX_MTD_SYSFS_ROOT		"/sys/class/mtd"
 
 struct linux_mtd_data {
 	FILE *dev_fp;
-	int device_is_writeable;
-	int no_erase;
+	bool device_is_writeable;
+	bool no_erase;
 	/* Size info is presented in bytes in sysfs. */
 	unsigned long int total_size;
 	unsigned long int numeraseregions;
 	/* only valid if numeraseregions is 0 */
 	unsigned long int erasesize;
 };
-
-static struct wp wp_mtd;	/* forward declaration */
 
 /* read a string from a sysfs file and sanitize it */
 static int read_sysfs_string(const char *sysfs_path, const char *filename, char *buf, int len)
@@ -136,10 +131,10 @@ static int get_mtd_info(const char *sysfs_path, struct linux_mtd_data *data)
 		return 1;
 	if (tmp & MTD_WRITEABLE) {
 		/* cache for later use by write function */
-		data->device_is_writeable = 1;
+		data->device_is_writeable = true;
 	}
 	if (tmp & MTD_NO_ERASE) {
-		data->no_erase = 1;
+		data->no_erase = true;
 	}
 
 	/* Device name */
@@ -182,10 +177,9 @@ static int linux_mtd_probe(struct flashctx *flash)
 {
 	struct linux_mtd_data *data = flash->mst->opaque.data;
 
-	flash->chip->wp = &wp_mtd;
 	if (data->no_erase)
 		flash->chip->feature_bits |= FEATURE_NO_ERASE;
-	flash->chip->tested = TEST_OK_PREW;
+	flash->chip->tested = TEST_OK_PREWB;
 	flash->chip->total_size = data->total_size / 1024;	/* bytes -> kB */
 	flash->chip->block_erasers[0].eraseblocks[0].size = data->erasesize;
 	flash->chip->block_erasers[0].eraseblocks[0].count =
@@ -221,6 +215,7 @@ static int linux_mtd_read(struct flashctx *flash, uint8_t *buf,
 		}
 
 		i += step;
+		update_progress(flash, FLASHROM_PROGRESS_READ, i, len);
 	}
 
 	return 0;
@@ -263,6 +258,7 @@ static int linux_mtd_write(struct flashctx *flash, const uint8_t *buf,
 		}
 
 		i += step;
+		update_progress(flash, FLASHROM_PROGRESS_WRITE, i, len);
 	}
 
 	return 0;
@@ -293,10 +289,13 @@ static int linux_mtd_erase(struct flashctx *flash,
 			.length = data->erasesize,
 		};
 
-		if (ioctl(fileno(data->dev_fp), MEMERASE, &erase_info) == -1) {
-			msg_perr("%s: ioctl: %s\n", __func__, strerror(errno));
-			return 1;
+		int ret = ioctl(fileno(data->dev_fp), MEMERASE, &erase_info);
+		if (ret < 0) {
+		        msg_perr("%s: MEMERASE ioctl call returned %d, error: %s\n",
+		                 __func__, ret, strerror(errno));
+		        return 1;
 		}
+		update_progress(flash, FLASHROM_PROGRESS_ERASE, u + data->erasesize, len);
 	}
 
 	return 0;
@@ -313,6 +312,123 @@ static int linux_mtd_shutdown(void *data)
 	return 0;
 }
 
+static enum flashrom_wp_result linux_mtd_wp_read_cfg(struct flashrom_wp_cfg *cfg, struct flashctx *flash)
+{
+	struct linux_mtd_data *data = flash->mst->opaque.data;
+	bool start_found = false;
+	bool end_found = false;
+
+	cfg->mode = FLASHROM_WP_MODE_DISABLED;
+	cfg->range.start = 0;
+	cfg->range.len = 0;
+
+	/* Check protection status of each block */
+	for (size_t u = 0; u < data->total_size; u += data->erasesize) {
+		struct erase_info_user erase_info = {
+			.start = u,
+			.length = data->erasesize,
+		};
+
+		int ret = ioctl(fileno(data->dev_fp), MEMISLOCKED, &erase_info);
+		if (ret == 0) {
+			/* Block is unprotected. */
+
+			if (start_found) {
+				end_found = true;
+			}
+		} else if (ret == 1) {
+			/* Block is protected. */
+
+			if (end_found) {
+				/*
+				 * We already found the end of another
+				 * protection range, so this is the start of a
+				 * new one.
+				 */
+				return FLASHROM_WP_ERR_OTHER;
+			}
+			if (!start_found) {
+				cfg->range.start = erase_info.start;
+				cfg->mode = FLASHROM_WP_MODE_HARDWARE;
+				start_found = true;
+			}
+			cfg->range.len += data->erasesize;
+		} else {
+			msg_perr("%s: ioctl: %s\n", __func__, strerror(errno));
+			return FLASHROM_WP_ERR_READ_FAILED;
+		}
+
+	}
+
+	return FLASHROM_WP_OK;
+}
+
+static enum flashrom_wp_result linux_mtd_wp_write_cfg(struct flashctx *flash, const struct flashrom_wp_cfg *cfg)
+{
+	const struct linux_mtd_data *data = flash->mst->opaque.data;
+
+	const struct erase_info_user entire_chip = {
+		.start = 0,
+		.length = data->total_size,
+	};
+	const struct erase_info_user desired_range = {
+		.start = cfg->range.start,
+		.length = cfg->range.len,
+	};
+
+	/*
+	 * MTD ioctls will enable hardware status register protection if and
+	 * only if the protected region is non-empty. Return an error if the
+	 * cfg cannot be activated using the MTD interface.
+	 */
+	if ((cfg->range.len == 0) != (cfg->mode == FLASHROM_WP_MODE_DISABLED)) {
+		return FLASHROM_WP_ERR_OTHER;
+	}
+
+	/*
+	 * MTD handles write-protection additively, so whatever new range is
+	 * specified is added to the range which is currently protected. To
+	 * just protect the requsted range, we need to disable the current
+	 * write protection and then enable it for the desired range.
+	 */
+	int ret = ioctl(fileno(data->dev_fp), MEMUNLOCK, &entire_chip);
+	if (ret < 0) {
+		msg_perr("%s: Failed to disable write-protection, MEMUNLOCK ioctl "
+			 "retuned %d, error: %s\n", __func__, ret, strerror(errno));
+		return FLASHROM_WP_ERR_WRITE_FAILED;
+	}
+
+	if (cfg->range.len > 0) {
+		ret = ioctl(fileno(data->dev_fp), MEMLOCK, &desired_range);
+		if (ret < 0) {
+			msg_perr("%s: Failed to enable write-protection, "
+				 "MEMLOCK ioctl retuned %d, error: %s\n",
+				 __func__, ret, strerror(errno));
+			return FLASHROM_WP_ERR_WRITE_FAILED;
+		}
+	}
+
+	/* Verify */
+	struct flashrom_wp_cfg readback_cfg;
+	enum flashrom_wp_result read_ret = linux_mtd_wp_read_cfg(&readback_cfg, flash);
+	if (read_ret != FLASHROM_WP_OK)
+		return read_ret;
+
+	if (readback_cfg.mode != cfg->mode ||
+		readback_cfg.range.start != cfg->range.start ||
+		readback_cfg.range.len != cfg->range.len) {
+		return FLASHROM_WP_ERR_VERIFY_FAILED;
+	}
+
+	return FLASHROM_WP_OK;
+}
+
+static enum flashrom_wp_result linux_mtd_wp_get_available_ranges(struct flashrom_wp_ranges **list, struct flashctx *flash)
+{
+	/* Not supported by MTD interface. */
+	return FLASHROM_WP_ERR_RANGE_LIST_UNAVAILABLE;
+}
+
 static const struct opaque_master linux_mtd_opaque_master = {
 	/* max_data_{read,write} don't have any effect for this programmer */
 	.max_data_read	= MAX_DATA_UNSPECIFIED,
@@ -322,6 +438,9 @@ static const struct opaque_master linux_mtd_opaque_master = {
 	.write		= linux_mtd_write,
 	.erase		= linux_mtd_erase,
 	.shutdown	= linux_mtd_shutdown,
+	.wp_read_cfg	= linux_mtd_wp_read_cfg,
+	.wp_write_cfg	= linux_mtd_wp_write_cfg,
+	.wp_get_ranges	= linux_mtd_wp_get_available_ranges,
 };
 
 /* Returns 0 if setup is successful, non-zero to indicate error */
@@ -375,22 +494,22 @@ linux_mtd_setup_exit:
 	return ret;
 }
 
-static int linux_mtd_init(void)
+static int linux_mtd_init(const struct programmer_cfg *cfg)
 {
-	char *param;
+	char *param_str;
 	int dev_num = 0;
 	int ret = 1;
 	struct linux_mtd_data *data = NULL;
 
-	param = extract_programmer_param("dev");
-	if (param) {
+	param_str = extract_programmer_param_str(cfg, "dev");
+	if (param_str) {
 		char *endptr;
 
-		dev_num = strtol(param, &endptr, 0);
+		dev_num = strtol(param_str, &endptr, 0);
 		if ((*endptr != '\0') || (dev_num < 0)) {
 			msg_perr("Invalid device number %s. Use flashrom -p "
 				"linux_mtd:dev=N where N is a valid MTD\n"
-				"device number.\n", param);
+				"device number.\n", param_str);
 			goto linux_mtd_init_exit;
 		}
 	}
@@ -406,13 +525,13 @@ static int linux_mtd_init(void)
 
 	struct stat s;
 	if (stat(sysfs_path, &s) < 0) {
-		if (param)
+		if (param_str)
 			msg_perr("%s does not exist\n", sysfs_path);
 		else
 			msg_pdbg("%s does not exist\n", sysfs_path);
 		goto linux_mtd_init_exit;
 	}
-	free(param);
+	free(param_str);
 
 	data = calloc(1, sizeof(*data));
 	if (!data) {
@@ -429,7 +548,7 @@ static int linux_mtd_init(void)
 	return register_opaque_master(&linux_mtd_opaque_master, data);
 
 linux_mtd_init_exit:
-	free(param);
+	free(param_str);
 	return ret;
 }
 
@@ -438,156 +557,4 @@ const struct programmer_entry programmer_linux_mtd = {
 	.type			= OTHER,
 	.devs.note		= "Device files /dev/mtd*\n",
 	.init			= linux_mtd_init,
-	.map_flash_region	= fallback_map,
-	.unmap_flash_region	= fallback_unmap,
-	.delay			= internal_delay,
-};
-
-/*
- * Write-protect functions.
- */
-static int mtd_wp_list_ranges(const struct flashctx *flash)
-{
-	/* TODO: implement this */
-	msg_perr("--wp-list is not currently implemented for MTD.\n");
-	return 1;
-}
-
-/*
- * We only have MEMLOCK to enable write-protection for a particular block,
- * so we need to do force the user to use --wp-range and --wp-enable
- * command-line arguments simultaneously. (Fortunately, CrOS factory
- * installer does this already).
- *
- * The --wp-range argument is processed first and will set these variables
- * which --wp-enable will use afterward.
- */
-static unsigned int wp_range_start;
-static unsigned int wp_range_len;
-static int wp_set_range_called = 0;
-
-static int mtd_wp_set_range(const struct flashctx *flash,
-			unsigned int start, unsigned int len)
-{
-	wp_range_start = start;
-	wp_range_len = len;
-
-	wp_set_range_called = 1;
-	return 0;
-}
-
-static int mtd_wp_enable_writeprotect(const struct flashctx *flash, enum wp_mode mode)
-{
-	struct linux_mtd_data *data = flash->mst->opaque.data;
-
-	struct erase_info_user entire_chip = {
-		.start = 0,
-		.length = data->total_size,
-	};
-	struct erase_info_user desired_range = {
-		.start = wp_range_start,
-		.length = wp_range_len,
-	};
-
-	if (!wp_set_range_called) {
-		msg_perr("For MTD, --wp-range and --wp-enable must be "
-			"used simultaneously.\n");
-		return 1;
-	}
-
-	/*
-	 * MTD handles write-protection additively, so whatever new range is
-	 * specified is added to the range which is currently protected. To be
-	 * consistent with flashrom behavior with other programmer interfaces,
-	 * we need to disable the current write protection and then enable
-	 * it for the desired range.
-	 */
-	if (ioctl(fileno(data->dev_fp), MEMUNLOCK, &entire_chip) == -1) {
-		msg_perr("%s: Failed to disable write-protection, ioctl: %s\n",
-				__func__, strerror(errno));
-		msg_perr("Did you disable WP#?\n");
-		return 1;
-	}
-
-	if (ioctl(fileno(data->dev_fp), MEMLOCK, &desired_range) == -1) {
-		msg_perr("%s: Failed to enable write-protection, ioctl: %s\n",
-				__func__, strerror(errno));
-		return 1;
-	}
-
-	return 0;
-}
-
-static int mtd_wp_disable_writeprotect(const struct flashctx *flash)
-{
-	struct linux_mtd_data *data = flash->mst->opaque.data;
-	struct erase_info_user erase_info;
-
-	if (wp_set_range_called) {
-		erase_info.start = wp_range_start;
-		erase_info.length = wp_range_len;
-	} else {
-		erase_info.start = 0;
-		erase_info.length = data->total_size;
-	}
-
-	if (ioctl(fileno(data->dev_fp), MEMUNLOCK, &erase_info) == -1) {
-		msg_perr("%s: ioctl: %s\n", __func__, strerror(errno));
-		msg_perr("Did you disable WP#?\n");
-		return 1;
-	}
-
-	return 0;
-}
-
-static int mtd_wp_status(const struct flashctx *flash,
-		uint32_t *_start, uint32_t *_len, bool *_wp_en)
-{
-	struct linux_mtd_data *data = flash->mst->opaque.data;
-	uint32_t start = 0, len = 0;
-	int start_found = 0;
-	unsigned int u;
-
-	/* For now, assume only one contiguous region can be locked (NOR) */
-	/* FIXME: use flash struct members instead of raw MTD values here */
-	for (u = 0; u < data->total_size; u += data->erasesize) {
-		int rc;
-		struct erase_info_user erase_info = {
-			.start = u,
-			.length = data->erasesize,
-		};
-
-		rc = ioctl(fileno(data->dev_fp), MEMISLOCKED, &erase_info);
-		if (rc < 0) {
-			msg_perr("%s: ioctl: %s\n", __func__, strerror(errno));
-			return 1;
-		} else if (rc == 1) {
-			if (!start_found) {
-				start = erase_info.start;
-				start_found = 1;
-			}
-			len += data->erasesize;
-		} else if (rc == 0) {
-			if (start_found) {
-				/* TODO: changes required for supporting non-contiguous locked regions */
-				break;
-			}
-		}
-
-	}
-
-	msg_cinfo("WP: write protect is %s.\n",
-			start_found ? "enabled": "disabled");
-	msg_pinfo("WP: write protect range: start=0x%08x, "
-			"len=0x%08x\n", start, len);
-
-	return 0;
-}
-
-static struct wp wp_mtd = {
-	.list_ranges	= mtd_wp_list_ranges,
-	.set_range	= mtd_wp_set_range,
-	.enable		= mtd_wp_enable_writeprotect,
-	.disable	= mtd_wp_disable_writeprotect,
-	.wp_status	= mtd_wp_status,
 };

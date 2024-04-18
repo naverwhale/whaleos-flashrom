@@ -18,7 +18,8 @@
 #include <string.h>
 #include "flash.h"
 #include "programmer.h"
-#include "hwaccess.h"
+#include "hwaccess_physmap.h"
+#include "platform/pci.h"
 
 #define PCI_VENDOR_ID_OGP 0x1227
 
@@ -91,13 +92,13 @@ static int ogp_bitbang_get_miso(void *spi_data)
 }
 
 static const struct bitbang_spi_master bitbang_spi_master_ogp = {
-	.set_cs = ogp_bitbang_set_cs,
-	.set_sck = ogp_bitbang_set_sck,
-	.set_mosi = ogp_bitbang_set_mosi,
-	.get_miso = ogp_bitbang_get_miso,
-	.request_bus = ogp_request_spibus,
-	.release_bus = ogp_release_spibus,
-	.half_period = 0,
+	.set_cs		= ogp_bitbang_set_cs,
+	.set_sck	= ogp_bitbang_set_sck,
+	.set_mosi	= ogp_bitbang_set_mosi,
+	.get_miso	= ogp_bitbang_get_miso,
+	.request_bus	= ogp_request_spibus,
+	.release_bus	= ogp_release_spibus,
+	.half_period	= 0,
 };
 
 static int ogp_spi_shutdown(void *data)
@@ -106,7 +107,7 @@ static int ogp_spi_shutdown(void *data)
 	return 0;
 }
 
-static int ogp_spi_init(void)
+static int ogp_spi_init(const struct programmer_cfg *cfg)
 {
 	struct pci_dev *dev = NULL;
 	char *type;
@@ -116,7 +117,7 @@ static int ogp_spi_init(void)
 	uint32_t ogp_reg__ce;
 	uint32_t ogp_reg_sck;
 
-	type = extract_programmer_param("rom");
+	type = extract_programmer_param_str(cfg, "rom");
 
 	if (!type) {
 		msg_perr("Please use flashrom -p ogp_spi:rom=... to specify "
@@ -139,10 +140,7 @@ static int ogp_spi_init(void)
 	}
 	free(type);
 
-	if (rget_io_perms())
-		return 1;
-
-	dev = pcidev_init(ogp_spi, PCI_BASE_ADDRESS_0);
+	dev = pcidev_init(cfg, ogp_spi, PCI_BASE_ADDRESS_0);
 	if (!dev)
 		return 1;
 
@@ -180,7 +178,4 @@ const struct programmer_entry programmer_ogp_spi = {
 	.type			= PCI,
 	.devs.dev		= ogp_spi,
 	.init			= ogp_spi_init,
-	.map_flash_region	= fallback_map,
-	.unmap_flash_region	= fallback_unmap,
-	.delay			= internal_delay,
 };

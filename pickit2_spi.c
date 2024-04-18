@@ -32,8 +32,6 @@
  * PICkit2 code: https://github.com/steve-m/avrdude/blob/master/pickit2.c
  */
 
-#include "platform.h"
-
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -91,20 +89,25 @@ struct pickit2_spi_data {
 #define SCR_VDD_OFF             0xFE
 #define SCR_VDD_ON              0xFF
 
+static int pickit2_interrupt_transfer(libusb_device_handle *handle, unsigned char endpoint, unsigned char *data)
+{
+	int transferred;
+	return libusb_interrupt_transfer(handle, endpoint, data, CMD_LENGTH, &transferred, DFLT_TIMEOUT);
+}
+
 static int pickit2_get_firmware_version(libusb_device_handle *pickit2_handle)
 {
 	int ret;
 	uint8_t command[CMD_LENGTH] = {CMD_GET_VERSION, CMD_END_OF_BUFFER};
-	int transferred;
 
-	ret = libusb_interrupt_transfer(pickit2_handle, ENDPOINT_OUT, command, CMD_LENGTH, &transferred, DFLT_TIMEOUT);
+	ret = pickit2_interrupt_transfer(pickit2_handle, ENDPOINT_OUT, command);
 
 	if (ret != 0) {
 		msg_perr("Command Get Firmware Version failed!\n");
 		return 1;
 	}
 
-	ret = libusb_interrupt_transfer(pickit2_handle, ENDPOINT_IN, command, CMD_LENGTH, &transferred, DFLT_TIMEOUT);
+	ret = pickit2_interrupt_transfer(pickit2_handle, ENDPOINT_IN, command);
 
 	if (ret != 0) {
 		msg_perr("Command Get Firmware Version failed!\n");
@@ -150,8 +153,7 @@ static int pickit2_set_spi_voltage(libusb_device_handle *pickit2_handle, int mil
 		voltage_selector * 13,
 		CMD_END_OF_BUFFER
 	};
-	int transferred;
-	int ret = libusb_interrupt_transfer(pickit2_handle, ENDPOINT_OUT, command, CMD_LENGTH, &transferred, DFLT_TIMEOUT);
+	int ret = pickit2_interrupt_transfer(pickit2_handle, ENDPOINT_OUT, command);
 
 	if (ret != 0) {
 		msg_perr("Command Set Voltage failed!\n");
@@ -186,8 +188,7 @@ static int pickit2_set_spi_speed(libusb_device_handle *pickit2_handle, unsigned 
 		CMD_END_OF_BUFFER
 	};
 
-	int transferred;
-	int ret = libusb_interrupt_transfer(pickit2_handle, ENDPOINT_OUT, command, CMD_LENGTH, &transferred, DFLT_TIMEOUT);
+	int ret = pickit2_interrupt_transfer(pickit2_handle, ENDPOINT_OUT, command);
 
 	if (ret != 0) {
 		msg_perr("Command Set SPI Speed failed!\n");
@@ -201,13 +202,14 @@ static int pickit2_spi_send_command(const struct flashctx *flash, unsigned int w
 				     const unsigned char *writearr, unsigned char *readarr)
 {
 	struct pickit2_spi_data *pickit2_data = flash->mst->spi.data;
+	const unsigned int total_packetsize = writecnt + readcnt + 20;
 
 	/* Maximum number of bytes per transaction (including command overhead) is 64. Lets play it safe
 	 * and always assume the worst case scenario of 20 bytes command overhead.
 	 */
-	if (writecnt + readcnt + 20 > CMD_LENGTH) {
-		msg_perr("\nTotal packetsize (%i) is greater than 64 supported, aborting.\n",
-			 writecnt + readcnt + 20);
+	if (total_packetsize > CMD_LENGTH) {
+		msg_perr("\nTotal packetsize (%i) is greater than %i supported, aborting.\n",
+			 total_packetsize, CMD_LENGTH);
 		return 1;
 	}
 
@@ -257,9 +259,7 @@ static int pickit2_spi_send_command(const struct flashctx *flash, unsigned int w
 	buf[i++] = CMD_UPLOAD_DATA;
 	buf[i++] = CMD_END_OF_BUFFER;
 
-	int transferred;
-	int ret = libusb_interrupt_transfer(pickit2_data->pickit2_handle,
-					ENDPOINT_OUT, buf, CMD_LENGTH, &transferred, DFLT_TIMEOUT);
+	int ret = pickit2_interrupt_transfer(pickit2_data->pickit2_handle, ENDPOINT_OUT, buf);
 
 	if (ret != 0) {
 		msg_perr("Send SPI failed!\n");
@@ -359,9 +359,7 @@ static int pickit2_shutdown(void *data)
 		CMD_END_OF_BUFFER
 	};
 
-	int transferred;
-	int ret = libusb_interrupt_transfer(pickit2_data->pickit2_handle,
-					ENDPOINT_OUT, command, CMD_LENGTH, &transferred, DFLT_TIMEOUT);
+	int ret = pickit2_interrupt_transfer(pickit2_data->pickit2_handle, ENDPOINT_OUT, command);
 
 	if (ret != 0) {
 		msg_perr("Command Shutdown failed!\n");
@@ -382,14 +380,12 @@ static const struct spi_master spi_master_pickit2 = {
 	.max_data_read	= 40,
 	.max_data_write	= 40,
 	.command	= pickit2_spi_send_command,
-	.multicommand	= default_spi_send_multicommand,
 	.read		= default_spi_read,
 	.write_256	= default_spi_write_256,
-	.write_aai	= default_spi_write_aai,
 	.shutdown	= pickit2_shutdown,
 };
 
-static int pickit2_spi_init(void)
+static int pickit2_spi_init(const struct programmer_cfg *cfg)
 {
 	uint8_t buf[CMD_LENGTH] = {
 		CMD_EXEC_SCRIPT,
@@ -411,28 +407,30 @@ static int pickit2_spi_init(void)
 	libusb_device_handle *pickit2_handle;
 	struct pickit2_spi_data *pickit2_data;
 	int spispeed_idx = 0;
-	char *spispeed = extract_programmer_param("spispeed");
-	if (spispeed != NULL) {
+	char *param_str;
+
+	param_str = extract_programmer_param_str(cfg, "spispeed");
+	if (param_str != NULL) {
 		int i = 0;
 		for (; spispeeds[i].name; i++) {
-			if (strcasecmp(spispeeds[i].name, spispeed) == 0) {
+			if (strcasecmp(spispeeds[i].name, param_str) == 0) {
 				spispeed_idx = i;
 				break;
 			}
 		}
 		if (spispeeds[i].name == NULL) {
 			msg_perr("Error: Invalid 'spispeed' value.\n");
-			free(spispeed);
+			free(param_str);
 			return 1;
 		}
-		free(spispeed);
+		free(param_str);
 	}
 
 	int millivolt = 3500;
-	char *voltage = extract_programmer_param("voltage");
-	if (voltage != NULL) {
-		millivolt = parse_voltage(voltage);
-		free(voltage);
+	param_str = extract_programmer_param_str(cfg, "voltage");
+	if (param_str != NULL) {
+		millivolt = parse_voltage(param_str);
+		free(param_str);
 		if (millivolt < 0)
 			return 1;
 	}
@@ -493,8 +491,7 @@ static int pickit2_spi_init(void)
 
 	/* Perform basic setup.
 	 * Configure pin directions and logic levels, turn Vdd on, turn busy LED on and clear buffers. */
-	int transferred;
-	if (libusb_interrupt_transfer(pickit2_handle, ENDPOINT_OUT, buf, CMD_LENGTH, &transferred, DFLT_TIMEOUT) != 0) {
+	if (pickit2_interrupt_transfer(pickit2_handle, ENDPOINT_OUT, buf) != 0) {
 		msg_perr("Command Setup failed!\n");
 		goto init_err_cleanup_exit;
 	}
@@ -511,7 +508,4 @@ const struct programmer_entry programmer_pickit2_spi = {
 	.type			= USB,
 	.devs.dev		= devs_pickit2_spi,
 	.init			= pickit2_spi_init,
-	.map_flash_region	= fallback_map,
-	.unmap_flash_region	= fallback_unmap,
-	.delay			= internal_delay,
 };

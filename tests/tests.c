@@ -16,20 +16,17 @@
 #include <include/test.h>
 #include "io_mock.h"
 #include "tests.h"
+#include "wraps.h"
+#include "io_real.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <pthread.h>
 
-/* redefinitions/wrapping */
-#define LOG_ME printf("%s is called\n", __func__)
-#define MOCK_HANDLE 2021
-
-static const struct io_mock *current_io = NULL;
-
-void io_mock_register(const struct io_mock *io)
+void *not_null(void)
 {
-	current_io = io;
+	return (void *)MOCK_FD;
 }
 
 /* Workaround for https://github.com/clibs/cmocka/issues/17 */
@@ -54,10 +51,10 @@ void *__wrap_physmap(const char *descr, uintptr_t phys_addr, size_t len)
 }
 
 struct pci_dev mock_pci_dev = {
-	.device_id = MOCK_HANDLE,
+	.device_id = NON_ZERO,
 };
 
-struct pci_dev *__wrap_pcidev_init(void *devs, int bar)
+struct pci_dev *__wrap_pcidev_init(const struct programmer_cfg *cfg, void *devs, int bar)
 {
 	LOG_ME;
 	return &mock_pci_dev;
@@ -66,7 +63,7 @@ struct pci_dev *__wrap_pcidev_init(void *devs, int bar)
 uintptr_t __wrap_pcidev_readbar(void *dev, int bar)
 {
 	LOG_ME;
-	return MOCK_HANDLE;
+	return NON_ZERO;
 }
 
 void __wrap_sio_write(uint16_t port, uint8_t reg, uint8_t data)
@@ -80,66 +77,121 @@ uint8_t __wrap_sio_read(uint16_t port, uint8_t reg)
 	return (uint8_t)mock();
 }
 
-int __wrap_open(const char *pathname, int flags)
+static int mock_open(const char *pathname, int flags, mode_t mode)
 {
-	LOG_ME;
-	if (current_io && current_io->open)
-		return current_io->open(current_io->state, pathname, flags);
-	return MOCK_HANDLE;
+	maybe_unmock_io(pathname);
+	if (get_io() && get_io()->iom_open)
+		return get_io()->iom_open(get_io()->state, pathname, flags, mode);
+
+	if (get_io() && get_io()->fallback_open_state) {
+		struct io_mock_fallback_open_state *io_state;
+		unsigned int open_state_flags;
+
+		io_state = get_io()->fallback_open_state;
+		assert_true(io_state->noc < MAX_MOCK_OPEN);
+		assert_non_null(io_state->paths[io_state->noc]);
+		assert_string_equal(pathname, io_state->paths[io_state->noc]);
+		open_state_flags = io_state->flags[io_state->noc];
+		assert_int_equal(flags & open_state_flags, open_state_flags);
+		io_state->noc++; // proceed to the next path upon next call.
+	}
+
+	return MOCK_FD;
 }
 
-int __wrap_open64(const char *pathname, int flags)
+int __wrap_open(const char *pathname, int flags, ...)
 {
 	LOG_ME;
-	if (current_io && current_io->open)
-		return current_io->open(current_io->state, pathname, flags);
-	return MOCK_HANDLE;
+	int mode = 0;
+	if (flags & O_CREAT) {
+		va_list ap;
+		va_start(ap, flags);
+		mode = va_arg(ap, int);
+		va_end(ap);
+	}
+	return mock_open(pathname, flags, (mode_t) mode);
+}
+
+int __wrap_open64(const char *pathname, int flags, ...)
+{
+	LOG_ME;
+	int mode = 0;
+	if (flags & O_CREAT) {
+		va_list ap;
+		va_start(ap, flags);
+		mode = va_arg(ap, int);
+		va_end(ap);
+	}
+	return mock_open(pathname, flags, (mode_t) mode);
+}
+
+int __wrap___open64_2(const char *pathname, int flags, ...)
+{
+	LOG_ME;
+	int mode = 0;
+	if (flags & O_CREAT) {
+		va_list ap;
+		va_start(ap, flags);
+		mode = va_arg(ap, int);
+		va_end(ap);
+	}
+	return mock_open(pathname, flags, (mode_t) mode);
 }
 
 int __wrap_ioctl(int fd, unsigned long int request, ...)
 {
 	LOG_ME;
-	if (current_io && current_io->ioctl) {
+	if (get_io() && get_io()->iom_ioctl) {
 		va_list args;
 		int out;
 		va_start(args, request);
-		out = current_io->ioctl(current_io->state, fd, request, args);
+		out = get_io()->iom_ioctl(get_io()->state, fd, request, args);
 		va_end(args);
 		return out;
 	}
-	return MOCK_HANDLE;
+	return 0;
 }
 
 int __wrap_write(int fd, const void *buf, size_t sz)
 {
 	LOG_ME;
-	if (current_io && current_io->write)
-		return current_io->write(current_io->state, fd, buf, sz);
+	if (get_io() && get_io()->iom_write)
+		return get_io()->iom_write(get_io()->state, fd, buf, sz);
 	return sz;
 }
 
 int __wrap_read(int fd, void *buf, size_t sz)
 {
 	LOG_ME;
-	if (current_io && current_io->read)
-		return current_io->read(current_io->state, fd, buf, sz);
+	if (get_io() && get_io()->iom_read)
+		return get_io()->iom_read(get_io()->state, fd, buf, sz);
 	return sz;
 }
 
 FILE *__wrap_fopen(const char *pathname, const char *mode)
 {
 	LOG_ME;
-	if (current_io && current_io->fopen)
-		return current_io->fopen(current_io->state, pathname, mode);
-	return (void *)MOCK_HANDLE;
+	maybe_unmock_io(pathname);
+	if (get_io() && get_io()->iom_fopen)
+		return get_io()->iom_fopen(get_io()->state, pathname, mode);
+	return not_null();
 }
 
 FILE *__wrap_fopen64(const char *pathname, const char *mode)
 {
 	LOG_ME;
-	if (current_io && current_io->fopen)
-		return current_io->fopen(current_io->state, pathname, mode);
-	return (void *)MOCK_HANDLE;
+	maybe_unmock_io(pathname);
+	if (get_io() && get_io()->iom_fopen)
+		return get_io()->iom_fopen(get_io()->state, pathname, mode);
+	return not_null();
+}
+
+FILE *__wrap_fdopen(int fd, const char *mode)
+{
+	LOG_ME;
+	if (get_io() && get_io()->iom_fdopen)
+		return get_io()->iom_fdopen(get_io()->state, fd, mode);
+	return not_null();
 }
 
 int __wrap_stat(const char *path, void *buf)
@@ -154,19 +206,87 @@ int __wrap_stat64(const char *path, void *buf)
 	return 0;
 }
 
+int __wrap___xstat(const char *path, void *buf)
+{
+	LOG_ME;
+	return 0;
+}
+
+int __wrap___xstat64(const char *path, void *buf)
+{
+	LOG_ME;
+	return 0;
+}
+
+int __wrap_fstat(int fd, void *buf)
+{
+	LOG_ME;
+	return 0;
+}
+
+int __wrap_fstat64(int fd, void *buf)
+{
+	LOG_ME;
+	return 0;
+}
+
+int __wrap___fstat50(int fd, void *buf)
+{
+	LOG_ME;
+	return 0;
+}
+
+int __wrap___fxstat(int fd, void *buf)
+{
+	LOG_ME;
+	return 0;
+}
+
+int __wrap___fxstat64(int fd, void *buf)
+{
+	LOG_ME;
+	return 0;
+}
+
 char *__wrap_fgets(char *buf, int len, FILE *fp)
 {
 	LOG_ME;
-	if (current_io && current_io->fgets)
-		return current_io->fgets(current_io->state, buf, len, fp);
+	if (get_io() && get_io()->iom_fgets)
+		return get_io()->iom_fgets(get_io()->state, buf, len, fp);
 	return NULL;
 }
 
-size_t __wrap_fread(void *ptr, size_t size, size_t len, FILE *fp)
+size_t __wrap_fread(void *ptr, size_t size, size_t nmemb, FILE *fp)
 {
 	LOG_ME;
-	if (current_io && current_io->fread)
-		return current_io->fread(current_io->state, ptr, size, len, fp);
+	if (get_io() && get_io()->iom_fread)
+		return get_io()->iom_fread(get_io()->state, ptr, size, nmemb, fp);
+	return nmemb;
+}
+
+size_t __wrap_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *fp)
+{
+	LOG_ME;
+	if (get_io() && get_io()->iom_fwrite)
+		return get_io()->iom_fwrite(get_io()->state, ptr, size, nmemb, fp);
+	return nmemb;
+}
+
+int __wrap_fflush(FILE *fp)
+{
+	LOG_ME;
+	return 0;
+}
+
+int __wrap_fileno(FILE *fp)
+{
+	LOG_ME;
+	return MOCK_FD;
+}
+
+int __wrap_fsync(int fd)
+{
+	LOG_ME;
 	return 0;
 }
 
@@ -176,11 +296,25 @@ int __wrap_setvbuf(FILE *fp, char *buf, int type, size_t size)
 	return 0;
 }
 
+int __wrap_fprintf(FILE *fp, const char *fmt, ...)
+{
+	LOG_ME;
+	if (get_io() && get_io()->iom_fprintf) {
+		va_list args;
+		int out;
+		va_start(args, fmt);
+		out = get_io()->iom_fprintf(get_io()->state, fp, fmt, args);
+		va_end(args);
+		return out;
+	}
+	return 0;
+}
+
 int __wrap_fclose(FILE *fp)
 {
 	LOG_ME;
-	if (current_io && current_io->fclose)
-		return current_io->fclose(current_io->state, fp);
+	if (get_io() && get_io()->iom_fclose)
+		return get_io()->iom_fclose(get_io()->state, fp);
 	return 0;
 }
 
@@ -195,6 +329,19 @@ int __wrap_ferror(FILE *fp)
 	/* LOG_ME; */
 	return 0;
 }
+
+int __wrap_flock(int fd, int operation)
+{
+	LOG_ME;
+	return 0;
+}
+
+int __wrap_ftruncate(int fd, off_t length)
+{
+	LOG_ME;
+	return 0;
+}
+
 void __wrap_clearerr(FILE *fp)
 {
 	/* LOG_ME; */
@@ -207,102 +354,76 @@ int __wrap_rget_io_perms(void)
 	return 0;
 }
 
-void __wrap_test_outb(unsigned char value, unsigned short port)
+void __wrap_OUTB(unsigned char value, unsigned short port)
 {
 	/* LOG_ME; */
-	if (current_io && current_io->outb)
-		current_io->outb(current_io->state, value, port);
+	if (get_io() && get_io()->outb)
+		get_io()->outb(get_io()->state, value, port);
 }
 
-unsigned char __wrap_test_inb(unsigned short port)
+unsigned char __wrap_INB(unsigned short port)
 {
 	/* LOG_ME; */
-	if (current_io && current_io->inb)
-		return current_io->inb(current_io->state, port);
+	if (get_io() && get_io()->inb)
+		return get_io()->inb(get_io()->state, port);
 	return 0;
 }
 
-void __wrap_test_outw(unsigned short value, unsigned short port)
+void __wrap_OUTW(unsigned short value, unsigned short port)
 {
 	/* LOG_ME; */
-	if (current_io && current_io->outw)
-		current_io->outw(current_io->state, value, port);
+	if (get_io() && get_io()->outw)
+		get_io()->outw(get_io()->state, value, port);
 }
 
-unsigned short __wrap_test_inw(unsigned short port)
+unsigned short __wrap_INW(unsigned short port)
 {
 	/* LOG_ME; */
-	if (current_io && current_io->inw)
-		return current_io->inw(current_io->state, port);
+	if (get_io() && get_io()->inw)
+		return get_io()->inw(get_io()->state, port);
 	return 0;
 }
 
-void __wrap_test_outl(unsigned int value, unsigned short port)
+void __wrap_OUTL(unsigned int value, unsigned short port)
 {
 	/* LOG_ME; */
-	if (current_io && current_io->outl)
-		current_io->outl(current_io->state, value, port);
+	if (get_io() && get_io()->outl)
+		get_io()->outl(get_io()->state, value, port);
 }
 
-unsigned int __wrap_test_inl(unsigned short port)
+unsigned int __wrap_INL(unsigned short port)
 {
 	/* LOG_ME; */
-	if (current_io && current_io->inl)
-		return current_io->inl(current_io->state, port);
+	if (get_io() && get_io()->inl)
+		return get_io()->inl(get_io()->state, port);
 	return 0;
 }
 
-void *__wrap_usb_dev_get_by_vid_pid_number(
-		libusb_context *usb_ctx, uint16_t vid, uint16_t pid, unsigned int num)
-{
-	LOG_ME;
-	return (void *)MOCK_HANDLE;
+static void *doing_nothing(void *vargp) {
+	return NULL;
 }
 
-int __wrap_libusb_set_configuration(libusb_device_handle *devh, int config)
-{
-	LOG_ME;
-	return 0;
-}
-
-int __wrap_libusb_claim_interface(libusb_device_handle *devh, int interface_number)
-{
-	LOG_ME;
-	return 0;
-}
-
-int __wrap_libusb_control_transfer(libusb_device_handle *devh, uint8_t bmRequestType,
-		uint8_t bRequest, uint16_t wValue, uint16_t wIndex, unsigned char *data,
-		uint16_t wLength, unsigned int timeout)
-{
-	LOG_ME;
-	if (current_io && current_io->libusb_control_transfer)
-		return current_io->libusb_control_transfer(current_io->state,
-				devh, bmRequestType, bRequest, wValue, wIndex, data, wLength, timeout);
-	return 0;
-}
-
-int __wrap_libusb_release_interface(libusb_device_handle *devh, int interface_number)
-{
-	LOG_ME;
-	return 0;
-}
-
-void __wrap_libusb_close(libusb_device_handle *devh)
-{
-	LOG_ME;
-}
-
-void __wrap_libusb_exit(libusb_context *ctx)
-{
-	LOG_ME;
-}
-
-int main(void)
+int main(int argc, char *argv[])
 {
 	int ret = 0;
 
+	if (argc > 1)
+		cmocka_set_test_filter(argv[1]);
+
 	cmocka_set_message_output(CM_OUTPUT_STDOUT);
+
+	/*
+	 * Creating new thread which is doing nothing, to trigger __isthreaded being 1.
+	 * This is a workaround for BSD family. In multi-threaded environment fileno
+	 * macro is expanded into a function which is possible to mock in unit tests.
+	 * Without this workaround, on a single-thread environment, fileno macro is
+	 * expanded into an inline access of a private field of a file descriptor,
+	 * which is impossible to mock.
+	 *
+	 * In other OSes this is just creating a thread which is doing nothing.
+	 */
+	pthread_t thread_id;
+	pthread_create(&thread_id, NULL, doing_nothing, NULL);
 
 	const struct CMUnitTest helpers_tests[] = {
 		cmocka_unit_test(address_to_bits_test_success),
@@ -315,6 +436,15 @@ int main(void)
 	};
 	ret |= cmocka_run_group_tests_name("helpers.c tests", helpers_tests, NULL, NULL);
 
+	const struct CMUnitTest selfcheck[] = {
+		cmocka_unit_test(selfcheck_programmer_table),
+		cmocka_unit_test(selfcheck_flashchips_table),
+		cmocka_unit_test(selfcheck_eraseblocks),
+		cmocka_unit_test(selfcheck_board_matches_table),
+	};
+	ret |= cmocka_run_group_tests_name("selfcheck.c tests", selfcheck,
+					   NULL, NULL);
+
 	const struct CMUnitTest flashrom_tests[] = {
 		cmocka_unit_test(flashbuses_to_text_test_success),
 	};
@@ -323,6 +453,7 @@ int main(void)
 	const struct CMUnitTest spi25_tests[] = {
 		cmocka_unit_test(spi_write_enable_test_success),
 		cmocka_unit_test(spi_write_disable_test_success),
+		cmocka_unit_test(spi_read_chunked_test_success),
 		cmocka_unit_test(probe_spi_rdid_test_success),
 		cmocka_unit_test(probe_spi_rdid4_test_success),
 		cmocka_unit_test(probe_spi_rems_test_success),
@@ -334,17 +465,30 @@ int main(void)
 	};
 	ret |= cmocka_run_group_tests_name("spi25.c tests", spi25_tests, NULL, NULL);
 
-	const struct CMUnitTest init_shutdown_tests[] = {
-		cmocka_unit_test(dummy_init_and_shutdown_test_success),
-		cmocka_unit_test(mec1308_init_and_shutdown_test_success),
-		cmocka_unit_test(nicrealtek_init_and_shutdown_test_success),
-		cmocka_unit_test(dediprog_init_and_shutdown_test_success),
-		cmocka_unit_test(ene_lpc_init_and_shutdown_test_success),
-		cmocka_unit_test(linux_mtd_init_and_shutdown_test_success),
-		cmocka_unit_test(linux_spi_init_and_shutdown_test_success),
-		cmocka_unit_test(realtek_mst_init_and_shutdown_test_success),
+	const struct CMUnitTest lifecycle_tests[] = {
+		cmocka_unit_test(dummy_basic_lifecycle_test_success),
+		cmocka_unit_test(dummy_probe_lifecycle_test_success),
+		cmocka_unit_test(dummy_probe_variable_size_test_success),
+		cmocka_unit_test(dummy_init_fails_unhandled_param_test_success),
+		cmocka_unit_test(dummy_init_success_invalid_param_test_success),
+		cmocka_unit_test(dummy_init_success_unhandled_param_test_success),
+		cmocka_unit_test(dummy_null_prog_param_test_success),
+		cmocka_unit_test(dummy_all_buses_test_success),
+		cmocka_unit_test(nicrealtek_basic_lifecycle_test_success),
+		cmocka_unit_test(raiden_debug_basic_lifecycle_test_success),
+		cmocka_unit_test(dediprog_basic_lifecycle_test_success),
+		cmocka_unit_test(linux_mtd_probe_lifecycle_test_success),
+		cmocka_unit_test(linux_spi_probe_lifecycle_test_success),
+		cmocka_unit_test(parade_lspcon_basic_lifecycle_test_success),
+		cmocka_unit_test(parade_lspcon_no_allow_brick_test_success),
+		cmocka_unit_test(mediatek_i2c_spi_basic_lifecycle_test_success),
+		cmocka_unit_test(mediatek_i2c_no_allow_brick_test_success),
+		cmocka_unit_test(realtek_mst_basic_lifecycle_test_success),
+		cmocka_unit_test(realtek_mst_no_allow_brick_test_success),
+		cmocka_unit_test(ch341a_spi_basic_lifecycle_test_success),
+		cmocka_unit_test(ch341a_spi_probe_lifecycle_test_success),
 	};
-	ret |= cmocka_run_group_tests_name("init_shutdown.c tests", init_shutdown_tests, NULL, NULL);
+	ret |= cmocka_run_group_tests_name("lifecycle.c tests", lifecycle_tests, NULL, NULL);
 
 	const struct CMUnitTest layout_tests[] = {
 		cmocka_unit_test(included_regions_dont_overlap_test_success),
@@ -359,8 +503,26 @@ int main(void)
 	const struct CMUnitTest chip_tests[] = {
 		cmocka_unit_test(erase_chip_test_success),
 		cmocka_unit_test(erase_chip_with_dummyflasher_test_success),
+		cmocka_unit_test(read_chip_test_success),
+		cmocka_unit_test(read_chip_with_dummyflasher_test_success),
+		cmocka_unit_test(write_chip_test_success),
+		cmocka_unit_test(write_chip_with_dummyflasher_test_success),
+		cmocka_unit_test(write_nonaligned_region_with_dummyflasher_test_success),
+		cmocka_unit_test(verify_chip_test_success),
+		cmocka_unit_test(verify_chip_with_dummyflasher_test_success),
 	};
 	ret |= cmocka_run_group_tests_name("chip.c tests", chip_tests, NULL, NULL);
+
+	const struct CMUnitTest chip_wp_tests[] = {
+		cmocka_unit_test(invalid_wp_range_dummyflasher_test_success),
+		cmocka_unit_test(set_wp_range_dummyflasher_test_success),
+		cmocka_unit_test(switch_wp_mode_dummyflasher_test_success),
+		cmocka_unit_test(wp_init_from_status_dummyflasher_test_success),
+		cmocka_unit_test(full_chip_erase_with_wp_dummyflasher_test_success),
+		cmocka_unit_test(partial_chip_erase_with_wp_dummyflasher_test_success),
+		cmocka_unit_test(wp_get_register_values_and_masks),
+	};
+	ret |= cmocka_run_group_tests_name("chip_wp.c tests", chip_wp_tests, NULL, NULL);
 
 	return ret;
 }

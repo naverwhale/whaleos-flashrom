@@ -14,14 +14,13 @@
  * GNU General Public License for more details.
  */
 
-#if defined(__i386__) || defined(__x86_64__)
-
 #include <stdlib.h>
 
 #include "flash.h"
 #include "chipdrivers.h"
 #include "programmer.h"
-#include "hwaccess.h"
+#include "hwaccess_physmap.h"
+#include "hwaccess_x86_io.h"
 #include "spi.h"
 
 #define WBSIO_PORT1	0x2e
@@ -156,7 +155,7 @@ static int wbsio_spi_send_command(const struct flashctx *flash, unsigned int wri
 
 	OUTB(writearr[0], data->spibase);
 	OUTB(mode, data->spibase + 1);
-	programmer_delay(10);
+	default_delay(10);
 
 	if (!readcnt)
 		return 0;
@@ -184,17 +183,18 @@ static int wbsio_spi_shutdown(void *data)
 }
 
 static const struct spi_master spi_master_wbsio = {
-	.max_data_read = MAX_DATA_UNSPECIFIED,
-	.max_data_write = MAX_DATA_UNSPECIFIED,
-	.command = wbsio_spi_send_command,
-	.multicommand = default_spi_send_multicommand,
-	.read = wbsio_spi_read,
-	.write_256 = spi_chip_write_1,
-	.write_aai = spi_chip_write_1,
-	.shutdown = wbsio_spi_shutdown,
+	.max_data_read	= MAX_DATA_UNSPECIFIED,
+	.max_data_write	= MAX_DATA_UNSPECIFIED,
+	.command	= wbsio_spi_send_command,
+	.map_flash_region	= physmap,
+	.unmap_flash_region	= physunmap,
+	.read		= wbsio_spi_read,
+	.write_256	= spi_chip_write_1,
+	.write_aai	= spi_chip_write_1,
+	.shutdown	= wbsio_spi_shutdown,
 };
 
-int wbsio_check_for_spi(void)
+int wbsio_check_for_spi(struct board_cfg *cfg)
 {
 	uint16_t wbsio_spibase = 0;
 
@@ -217,5 +217,3 @@ int wbsio_check_for_spi(void)
 
 	return register_spi_master(&spi_master_wbsio, data);
 }
-
-#endif /* defined(__i386__) || defined(__x86_64__) */

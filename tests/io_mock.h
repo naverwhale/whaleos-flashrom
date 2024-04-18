@@ -31,27 +31,42 @@
 #ifndef _IO_MOCK_H_
 #define _IO_MOCK_H_
 
+#include <include/test.h>
+
 /* Required for `FILE *` */
 #include <stdio.h>
 
-/* Define libusb symbols to avoid dependency on libusb.h */
-struct libusb_device_handle;
-typedef struct libusb_device_handle libusb_device_handle;
-struct libusb_context;
-typedef struct libusb_context libusb_context;
+#include <stdint.h>
+
+/* Required for struct timeval and mode_t */
+#include <sys/types.h>
+#include <sys/time.h>
+
+#include "usb_unittests.h"
+
+/* Address value needs fit into uint8_t. */
+#define USB_DEVICE_ADDRESS 19
 
 /* Define struct pci_dev to avoid dependency on pci.h */
 struct pci_dev {
+	char padding[18];
 	unsigned int device_id;
 };
 
-/* POSIX open() flags, avoiding dependency on fcntl.h */
-#define O_RDONLY 0
-#define O_WRONLY 1
-#define O_RDWR 2
-
 /* Linux I2C interface constants, avoiding linux/i2c-dev.h */
 #define I2C_SLAVE 0x0703
+
+/* Always return success for tests. */
+#define S_ISREG(x) 0
+
+/* Maximum number of open calls to mock. This number is arbitrary. */
+#define MAX_MOCK_OPEN 4
+
+struct io_mock_fallback_open_state {
+	unsigned int noc;
+	const char *paths[MAX_MOCK_OPEN];
+	int flags[MAX_MOCK_OPEN];
+};
 
 struct io_mock {
 	void *state;
@@ -67,6 +82,7 @@ struct io_mock {
 	unsigned int (*inl)(void *state, unsigned short port);
 
 	/* USB I/O */
+	int (*libusb_init)(void *state, libusb_context **ctx);
 	int (*libusb_control_transfer)(void *state,
 					libusb_device_handle *devh,
 					uint8_t bmRequestType,
@@ -76,20 +92,43 @@ struct io_mock {
 					unsigned char *data,
 					uint16_t wLength,
 					unsigned int timeout);
+	ssize_t (*libusb_get_device_list)(void *state, libusb_context *, libusb_device ***list);
+	void (*libusb_free_device_list)(void *state, libusb_device **list, int unref_devices);
+	int (*libusb_get_device_descriptor)(void *state, libusb_device *, struct libusb_device_descriptor *);
+	int (*libusb_get_config_descriptor)(void *state,
+						libusb_device *,
+						uint8_t config_index,
+						struct libusb_config_descriptor **);
+	void (*libusb_free_config_descriptor)(void *state, struct libusb_config_descriptor *);
+	struct libusb_transfer* (*libusb_alloc_transfer)(void *state, int iso_packets);
+	int (*libusb_submit_transfer)(void *state, struct libusb_transfer *transfer);
+	void (*libusb_free_transfer)(void *state, struct libusb_transfer *transfer);
+	int (*libusb_handle_events_timeout)(void *state, libusb_context *ctx, struct timeval *tv);
 
 	/* POSIX File I/O */
-	int (*open)(void *state, const char *pathname, int flags);
-	int (*ioctl)(void *state, int fd, unsigned long request, va_list args);
-	int (*read)(void *state, int fd, void *buf, size_t sz);
-	int (*write)(void *state, int fd, const void *buf, size_t sz);
+	int (*iom_open)(void *state, const char *pathname, int flags, mode_t mode);
+	int (*iom_ioctl)(void *state, int fd, unsigned long request, va_list args);
+	int (*iom_read)(void *state, int fd, void *buf, size_t sz);
+	int (*iom_write)(void *state, int fd, const void *buf, size_t sz);
 
 	/* Standard I/O */
-	FILE* (*fopen)(void *state, const char *pathname, const char *mode);
-	char* (*fgets)(void *state, char *buf, int len, FILE *fp);
-	size_t (*fread)(void *state, void *buf, size_t size, size_t len, FILE *fp);
-	int (*fclose)(void *state, FILE *fp);
+	FILE* (*iom_fopen)(void *state, const char *pathname, const char *mode);
+	char* (*iom_fgets)(void *state, char *buf, int len, FILE *fp);
+	size_t (*iom_fread)(void *state, void *buf, size_t size, size_t len, FILE *fp);
+	size_t (*iom_fwrite)(void *state, const void *buf, size_t size, size_t len, FILE *fp);
+	int (*iom_fprintf)(void *state, FILE *fp, const char *fmt, va_list args);
+	int (*iom_fclose)(void *state, FILE *fp);
+	FILE *(*iom_fdopen)(void *state, int fd, const char *mode);
+
+	/*
+	 * An alternative to custom open mock. A test can either register its
+	 * own mock open function or fallback_open_state.
+	 */
+	struct io_mock_fallback_open_state *fallback_open_state;
 };
 
 void io_mock_register(const struct io_mock *io);
+
+const struct io_mock *get_io(void);
 
 #endif

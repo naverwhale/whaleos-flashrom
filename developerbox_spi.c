@@ -31,8 +31,6 @@
  * should be turned on).
  */
 
-#include "platform.h"
-
 #include <stdlib.h>
 #include <libusb.h>
 #include "programmer.h"
@@ -126,11 +124,11 @@ static void cp210x_bitbang_set_sck_set_mosi(int sck, int mosi, void *spi_data)
 }
 
 static const struct bitbang_spi_master bitbang_spi_master_cp210x = {
-	.set_cs = cp210x_bitbang_set_cs,
-	.set_sck = cp210x_bitbang_set_sck,
-	.set_mosi = cp210x_bitbang_set_mosi,
-	.get_miso = cp210x_bitbang_get_miso,
-	.set_sck_set_mosi = cp210x_bitbang_set_sck_set_mosi,
+	.set_cs			= cp210x_bitbang_set_cs,
+	.set_sck		= cp210x_bitbang_set_sck,
+	.set_mosi		= cp210x_bitbang_set_mosi,
+	.get_miso		= cp210x_bitbang_get_miso,
+	.set_sck_set_mosi	= cp210x_bitbang_set_sck_set_mosi,
 };
 
 static int developerbox_spi_shutdown(void *spi_data)
@@ -144,18 +142,17 @@ static int developerbox_spi_shutdown(void *spi_data)
 	return 0;
 }
 
-static int developerbox_spi_init(void)
+static int developerbox_spi_init(const struct programmer_cfg *cfg)
 {
 	struct libusb_context *usb_ctx;
 	libusb_device_handle *cp210x_handle;
 
-	libusb_init(&usb_ctx);
-	if (!usb_ctx) {
+	if (libusb_init(&usb_ctx)) {
 		msg_perr("Could not initialize libusb!\n");
 		return 1;
 	}
 
-	char *serialno = extract_programmer_param("serial");
+	char *serialno = extract_programmer_param_str(cfg, "serial");
 	if (serialno)
 		msg_pdbg("Looking for serial number commencing %s\n", serialno);
 	cp210x_handle = usb_dev_get_by_vid_pid_serial(usb_ctx,
@@ -196,7 +193,4 @@ const struct programmer_entry programmer_developerbox = {
 	.type			= USB,
 	.devs.dev		= devs_developerbox_spi,
 	.init			= developerbox_spi_init,
-	.map_flash_region	= fallback_map,
-	.unmap_flash_region	= fallback_unmap,
-	.delay			= internal_delay,
 };

@@ -11,17 +11,28 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 
-root_includes = include_directories('../subprojects')
-
-srcs = [
+test_srcs = files(
+  'io_mock.c',
   'tests.c',
+  'libusb_wraps.c',
   'helpers.c',
   'flashrom.c',
   'spi25.c',
-  'init_shutdown.c',
+  'lifecycle.c',
   'layout.c',
   'chip.c',
-]
+  'chip_wp.c',
+  'selfcheck.c',
+  'io_real.c',
+)
+
+if not programmer.get('dummy').get('active')
+  test_srcs += programmer.get('dummy').get('srcs')
+endif
+
+foreach p_name, p_data : programmer
+  test_srcs += p_data.get('test_srcs')
+endforeach
 
 mocks = [
   '-Wl,--wrap=strdup',
@@ -34,83 +45,92 @@ mocks = [
   '-Wl,--wrap=sio_read',
   '-Wl,--wrap=open',
   '-Wl,--wrap=open64',
+  '-Wl,--wrap=__open64_2',
   '-Wl,--wrap=ioctl',
   '-Wl,--wrap=read',
   '-Wl,--wrap=write',
   '-Wl,--wrap=fopen',
   '-Wl,--wrap=fopen64',
+  '-Wl,--wrap=fdopen',
+  '-Wl,--wrap=fwrite',
+  '-Wl,--wrap=fflush',
   '-Wl,--wrap=stat',
   '-Wl,--wrap=stat64',
+  '-Wl,--wrap=__xstat',
+  '-Wl,--wrap=__xstat64',
+  '-Wl,--wrap=fstat',
+  '-Wl,--wrap=fstat64',
+  '-Wl,--wrap=__fstat50',
+  '-Wl,--wrap=__fxstat',
+  '-Wl,--wrap=__fxstat64',
+  '-Wl,--wrap=fileno',
+  '-Wl,--wrap=fsync',
   '-Wl,--wrap=fread',
   '-Wl,--wrap=fgets',
+  '-Wl,--wrap=fprintf',
   '-Wl,--wrap=fclose',
   '-Wl,--wrap=feof',
   '-Wl,--wrap=ferror',
+  '-Wl,--wrap=flock',
+  '-Wl,--wrap=ftruncate',
   '-Wl,--wrap=clearerr',
   '-Wl,--wrap=setvbuf',
   '-Wl,--wrap=rget_io_perms',
-  '-Wl,--wrap=test_outb',
-  '-Wl,--wrap=test_inb',
-  '-Wl,--wrap=test_outw',
-  '-Wl,--wrap=test_inw',
-  '-Wl,--wrap=test_outl',
-  '-Wl,--wrap=test_inl',
+  '-Wl,--wrap=OUTB',
+  '-Wl,--wrap=INB',
+  '-Wl,--wrap=OUTW',
+  '-Wl,--wrap=INW',
+  '-Wl,--wrap=OUTL',
+  '-Wl,--wrap=INL',
   '-Wl,--wrap=usb_dev_get_by_vid_pid_number',
+  '-Wl,--wrap=libusb_init',
+  '-Wl,--wrap=libusb_set_debug',
+  '-Wl,--wrap=libusb_set_option',
+  '-Wl,--wrap=libusb_open',
+  '-Wl,--wrap=libusb_set_auto_detach_kernel_driver',
+  '-Wl,--wrap=libusb_detach_kernel_driver',
+  '-Wl,--wrap=libusb_attach_kernel_driver',
+  '-Wl,--wrap=libusb_open_device_with_vid_pid',
+  '-Wl,--wrap=libusb_get_device',
+  '-Wl,--wrap=libusb_get_device_list',
+  '-Wl,--wrap=libusb_free_device_list',
+  '-Wl,--wrap=libusb_get_bus_number',
+  '-Wl,--wrap=libusb_get_device_address',
+  '-Wl,--wrap=libusb_get_device_descriptor',
+  '-Wl,--wrap=libusb_get_config_descriptor',
+  '-Wl,--wrap=libusb_free_config_descriptor',
+  '-Wl,--wrap=libusb_get_configuration',
   '-Wl,--wrap=libusb_set_configuration',
   '-Wl,--wrap=libusb_claim_interface',
   '-Wl,--wrap=libusb_control_transfer',
   '-Wl,--wrap=libusb_release_interface',
+  '-Wl,--wrap=libusb_ref_device',
+  '-Wl,--wrap=libusb_unref_device',
   '-Wl,--wrap=libusb_close',
+  '-Wl,--wrap=libusb_alloc_transfer',
+  '-Wl,--wrap=libusb_submit_transfer',
+  '-Wl,--wrap=libusb_free_transfer',
+  '-Wl,--wrap=libusb_handle_events_timeout',
   '-Wl,--wrap=libusb_exit',
   '-Wl,--gc-sections',
 ]
 
+threads_dep = dependency('threads')
+
 flashrom_tests = executable('flashrom_unit_tests',
-  srcs,
-  include_directories : root_includes,
+  test_srcs,
   c_args : [
     cargs,
     '-ffunction-sections',
     '-fdata-sections',
-    #    '-DSTANDALONE',
+    '-U_FORTIFY_SOURCE',
   ],
   export_dynamic : true,
-  link_args : mocks,
-  dependencies : [cmocka_dep, flashrom_test_dep],
+  link_args : mocks + link_args,
+  dependencies : [cmocka_dep, flashrom_test_dep, threads_dep],
 )
-test('cmocka test flashrom', flashrom_tests)
+test('cmocka test flashrom', flashrom_tests, timeout: 0)
 
-
-writeprotect_mocks = [
-  '-Wl,--wrap=spi_send_command',
-  '-Wl,--wrap=spi_read_status_register',
-  '-Wl,--wrap=spi_write_status_register',
-  '-Wl,--wrap=w25q_read_status_register_2',
-  '-Wl,--wrap=w25q_write_status_register_WREN',
-  '-Wl,--wrap=mx25l_read_config_register',
-  '-Wl,--gc-sections',
-]
-
-writeprotect_srcs = [
-  'wp_tests.c',
-  'wp_enable_disable.c',
-  'wp_chip_info.c',
-]
-
-writeprotect_tests = executable('writeprotect_unit_tests',
-  writeprotect_srcs,
-  include_directories : root_includes,
-  c_args : [
-    cargs,
-    '-ffunction-sections',
-    '-fdata-sections',
-  ],
-  export_dynamic : true,
-  link_args : writeprotect_mocks,
-  dependencies : [cmocka_dep, writeprotect_test_dep],
-)
-# b/195978970: writeprotect tests can cause presubmit
-# timeouts, disable them for now.
-if false
-  test('cmocka test writeprotect', writeprotect_tests, timeout: 180)
+if get_option('llvm_cov').enabled()
+  run_target('llvm-cov-tests', command : ['../scripts/llvm-cov', flashrom_tests])
 endif

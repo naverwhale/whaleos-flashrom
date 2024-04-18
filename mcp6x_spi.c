@@ -19,13 +19,12 @@
  * created by Michael Karcher.
  */
 
-#if defined(__i386__) || defined(__x86_64__)
-
 #include <stdlib.h>
 #include <ctype.h>
 #include "flash.h"
 #include "programmer.h"
-#include "hwaccess.h"
+#include "hwaccess_physmap.h"
+#include "platform/pci.h"
 
 /* Bit positions for each pin. */
 
@@ -101,13 +100,13 @@ static int mcp6x_bitbang_get_miso(void *spi_data)
 }
 
 static const struct bitbang_spi_master bitbang_spi_master_mcp6x = {
-	.set_cs = mcp6x_bitbang_set_cs,
-	.set_sck = mcp6x_bitbang_set_sck,
-	.set_mosi = mcp6x_bitbang_set_mosi,
-	.get_miso = mcp6x_bitbang_get_miso,
-	.request_bus = mcp6x_request_spibus,
-	.release_bus = mcp6x_release_spibus,
-	.half_period = 0,
+	.set_cs		= mcp6x_bitbang_set_cs,
+	.set_sck	= mcp6x_bitbang_set_sck,
+	.set_mosi	= mcp6x_bitbang_set_mosi,
+	.get_miso	= mcp6x_bitbang_get_miso,
+	.request_bus	= mcp6x_request_spibus,
+	.release_bus	= mcp6x_release_spibus,
+	.half_period	= 0,
 };
 
 static int mcp6x_shutdown(void *spi_data)
@@ -125,7 +124,7 @@ int mcp6x_spi_init(int want_spi)
 	uint8_t mcp_gpiostate;
 
 	/* Look for the SMBus device (SMBus PCI class) */
-	smbusdev = pci_dev_find_vendorclass(0x10de, 0x0c05);
+	smbusdev = pcidev_find_vendorclass(0x10de, 0x0c05);
 	if (!smbusdev) {
 		if (want_spi) {
 			msg_perr("ERROR: SMBus device not found. Not enabling "
@@ -147,7 +146,7 @@ int mcp6x_spi_init(int want_spi)
 	 * 32-bit non-prefetchable memory BAR.
 	 */
 	mcp6x_spibaraddr &= ~0xffff;
-	msg_pdbg("MCP SPI BAR is at 0x%08x\n", mcp6x_spibaraddr);
+	msg_pdbg("MCP SPI BAR is at 0x%08"PRIx32"\n", mcp6x_spibaraddr);
 
 	/* Accessing a NULL pointer BAR is evil. Don't do it. */
 	if (!mcp6x_spibaraddr && want_spi) {
@@ -192,5 +191,3 @@ int mcp6x_spi_init(int want_spi)
 
 	return 0;
 }
-
-#endif

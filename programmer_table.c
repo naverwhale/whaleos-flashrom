@@ -24,10 +24,6 @@ const struct programmer_entry *const programmer_table[] = {
     &programmer_dummy,
 #endif
 
-#if CONFIG_MEC1308 == 1
-    &programmer_mec1308,
-#endif
-
 #if CONFIG_NIC3COM == 1
     &programmer_nic3com,
 #endif
@@ -54,6 +50,10 @@ const struct programmer_entry *const programmer_table[] = {
 
 #if CONFIG_SATASII == 1
     &programmer_satasii,
+#endif
+
+#if CONFIG_ASM106X == 1
+    &programmer_asm106x,
 #endif
 
 #if CONFIG_ATAHPT == 1
@@ -92,10 +92,6 @@ const struct programmer_entry *const programmer_table[] = {
     &programmer_developerbox,
 #endif
 
-#if CONFIG_ENE_LPC == 1
-    &programmer_ene_lpc,
-#endif
-
 #if CONFIG_RAYER_SPI == 1
     &programmer_rayer_spi,
 #endif
@@ -132,8 +128,12 @@ const struct programmer_entry *const programmer_table[] = {
     &programmer_linux_spi,
 #endif
 
-#if CONFIG_LSPCON_I2C_SPI == 1
-    &programmer_lspcon_i2c_spi,
+#if CONFIG_PARADE_LSPCON == 1
+    &programmer_parade_lspcon,
+#endif
+
+#if CONFIG_MEDIATEK_I2C_SPI == 1
+    &programmer_mediatek_i2c_spi,
 #endif
 
 #if CONFIG_REALTEK_MST_I2C_SPI == 1
@@ -156,6 +156,10 @@ const struct programmer_entry *const programmer_table[] = {
     &programmer_ch341a_spi,
 #endif
 
+#if CONFIG_CH347_SPI == 1
+    &programmer_ch347_spi,
+#endif
+
 #if CONFIG_DIGILENT_SPI == 1
     &programmer_digilent_spi,
 #endif
@@ -172,14 +176,18 @@ const struct programmer_entry *const programmer_table[] = {
     &programmer_stlinkv3_spi,
 #endif
 
-#if CONFIG_GOOGLE_EC == 1
-    &programmer_google_ec,
+#if CONFIG_CROS_EC == 1
+    &programmer_cros_ec,
 #endif
 
 #if CONFIG_CROS_ALIAS == 1
-    &programmer_google_ec_alias,
     &programmer_google_host_alias,
 #endif
+
+#if CONFIG_DIRTYJTAG_SPI == 1
+    &programmer_dirtyjtag_spi,
+#endif
+
 };
 
 const size_t programmer_table_size = ARRAY_SIZE(programmer_table);

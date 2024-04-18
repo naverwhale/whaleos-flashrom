@@ -34,7 +34,7 @@
 //
 
 use std::ffi::OsStr;
-use std::fmt::Debug;
+use std::fs;
 use std::io::Result as IoResult;
 use std::process::{Command, Stdio};
 
@@ -60,21 +60,11 @@ pub fn bios_info() -> IoResult<String> {
     dmidecode_dispatch(&["-q", "-t0"])
 }
 
-pub fn eventlog_list() -> Result<String, std::io::Error> {
-    mosys_dispatch(&["eventlog", "list"])
-}
-
-fn mosys_dispatch<S: AsRef<OsStr> + Debug>(args: &[S]) -> IoResult<String> {
-    info!("mosys_dispatch() running: /usr/sbin/mosys {:?}", args);
-
-    let output = Command::new("/usr/sbin/mosys")
-        .args(args)
-        .stdin(Stdio::null())
-        .output()?;
-    if !output.status.success() {
-        return Err(utils::translate_command_error(&output));
+pub fn release_description() -> IoResult<String> {
+    for l in fs::read_to_string("/etc/lsb-release")?.lines() {
+        if l.starts_with("CHROMEOS_RELEASE_DESCRIPTION") {
+            return Ok(l.to_string());
+        }
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    Ok(stdout)
+    Err(std::io::ErrorKind::NotFound.into())
 }

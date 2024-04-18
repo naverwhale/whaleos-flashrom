@@ -16,6 +16,8 @@
 #ifndef TESTS_H
 #define TESTS_H
 
+#include <fcntl.h>
+
 /* helpers.c */
 void address_to_bits_test_success(void **state);
 void bitcount_test_success(void **state);
@@ -31,6 +33,7 @@ void flashbuses_to_text_test_success(void **state);
 /* spi25.c */
 void spi_write_enable_test_success(void **state);
 void spi_write_disable_test_success(void **state);
+void spi_read_chunked_test_success(void **state);
 void probe_spi_rdid_test_success(void **state);
 void probe_spi_rdid4_test_success(void **state);
 void probe_spi_rems_test_success(void **state);
@@ -40,15 +43,28 @@ void probe_spi_res3_test_success(void **state);
 void probe_spi_at25f_test_success(void **state);
 void probe_spi_st95_test_success(void **state); /* spi95.c */
 
-/* init_shutdown.c */
-void dummy_init_and_shutdown_test_success(void **state);
-void mec1308_init_and_shutdown_test_success(void **state);
-void nicrealtek_init_and_shutdown_test_success(void **state);
-void dediprog_init_and_shutdown_test_success(void **state);
-void ene_lpc_init_and_shutdown_test_success(void **state);
-void linux_mtd_init_and_shutdown_test_success(void **state);
-void linux_spi_init_and_shutdown_test_success(void **state);
-void realtek_mst_init_and_shutdown_test_success(void **state);
+/* lifecycle.c */
+void dummy_basic_lifecycle_test_success(void **state);
+void dummy_probe_lifecycle_test_success(void **state);
+void dummy_probe_variable_size_test_success(void **state);
+void dummy_init_fails_unhandled_param_test_success(void **state);
+void dummy_init_success_invalid_param_test_success(void **state);
+void dummy_init_success_unhandled_param_test_success(void **state);
+void dummy_null_prog_param_test_success(void **state);
+void dummy_all_buses_test_success(void **state);
+void nicrealtek_basic_lifecycle_test_success(void **state);
+void raiden_debug_basic_lifecycle_test_success(void **state);
+void dediprog_basic_lifecycle_test_success(void **state);
+void linux_mtd_probe_lifecycle_test_success(void **state);
+void linux_spi_probe_lifecycle_test_success(void **state);
+void parade_lspcon_basic_lifecycle_test_success(void **state);
+void parade_lspcon_no_allow_brick_test_success(void **state);
+void mediatek_i2c_spi_basic_lifecycle_test_success(void **state);
+void mediatek_i2c_no_allow_brick_test_success(void **state);
+void realtek_mst_basic_lifecycle_test_success(void **state);
+void realtek_mst_no_allow_brick_test_success(void **state);
+void ch341a_spi_basic_lifecycle_test_success(void **state);
+void ch341a_spi_probe_lifecycle_test_success(void **state);
 
 /* layout.c */
 void included_regions_dont_overlap_test_success(void **state);
@@ -61,5 +77,27 @@ void layout_region_invalid_range_test_success(void **state);
 /* chip.c */
 void erase_chip_test_success(void **state);
 void erase_chip_with_dummyflasher_test_success(void **state);
+void read_chip_test_success(void **state);
+void read_chip_with_dummyflasher_test_success(void **state);
+void write_chip_test_success(void **state);
+void write_chip_with_dummyflasher_test_success(void **state);
+void write_nonaligned_region_with_dummyflasher_test_success(void **state);
+void verify_chip_test_success(void **state);
+void verify_chip_with_dummyflasher_test_success(void **state);
+
+/* chip_wp.c */
+void invalid_wp_range_dummyflasher_test_success(void **state);
+void set_wp_range_dummyflasher_test_success(void **state);
+void switch_wp_mode_dummyflasher_test_success(void **state);
+void wp_init_from_status_dummyflasher_test_success(void **state);
+void full_chip_erase_with_wp_dummyflasher_test_success(void **state);
+void partial_chip_erase_with_wp_dummyflasher_test_success(void **state);
+void wp_get_register_values_and_masks(void **state);
+
+/* selfcheck.c */
+void selfcheck_programmer_table(void **state);
+void selfcheck_flashchips_table(void **state);
+void selfcheck_eraseblocks(void **state);
+void selfcheck_board_matches_table(void **state);
 
 #endif /* TESTS_H */

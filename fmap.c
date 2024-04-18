@@ -35,6 +35,7 @@
  */
 
 #include <ctype.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -91,14 +92,17 @@ static int is_valid_fmap(const struct fmap *fmap)
  *         -1 to indicate that fmap was not found
  *         -2 to indicate fmap is truncated or exceeds buffer + len
  */
-static off_t fmap_lsearch(const uint8_t *buf, size_t len)
+static ssize_t fmap_lsearch(const uint8_t *buf, size_t len)
 {
-	off_t offset;
-	bool fmap_found = 0;
+	ssize_t offset;
+	bool fmap_found = false;
 
-	for (offset = 0; offset <= (off_t)(len - sizeof(struct fmap)); offset++) {
+	if (len < sizeof(struct fmap))
+		return -1;
+
+	for (offset = 0; offset <= (ssize_t)(len - sizeof(struct fmap)); offset++) {
 		if (is_valid_fmap((struct fmap *)&buf[offset])) {
-			fmap_found = 1;
+			fmap_found = true;
 			break;
 		}
 	}
@@ -128,7 +132,7 @@ static off_t fmap_lsearch(const uint8_t *buf, size_t len)
  */
 int fmap_read_from_buffer(struct fmap **fmap_out, const uint8_t *const buf, size_t len)
 {
-	off_t offset = fmap_lsearch(buf, len);
+	ssize_t offset = fmap_lsearch(buf, len);
 	if (offset < 0) {
 		msg_gdbg("Unable to find fmap in provided buffer.\n");
 		return 2;
@@ -163,7 +167,7 @@ static int fmap_lsearch_rom(struct fmap **fmap_out,
 		goto _finalize_ret;
 	}
 
-	ret = flashctx->chip->read(flashctx, buf + rom_offset, rom_offset, len);
+	ret = read_flash(flashctx, buf + rom_offset, rom_offset, len);
 	if (ret) {
 		msg_pdbg("Cannot read ROM contents.\n");
 		goto _free_ret;
@@ -181,7 +185,9 @@ static int fmap_bsearch_rom(struct fmap **fmap_out, struct flashctx *const flash
 		size_t rom_offset, size_t len, size_t min_stride)
 {
 	size_t stride, fmap_len = 0;
-	int ret = 1, fmap_found = 0, check_offset_0 = 1;
+	int ret = 1;
+	bool fmap_found = false;
+	bool check_offset_0 = true;
 	struct fmap *fmap;
 	const unsigned int chip_size = flashctx->chip->total_size * 1024;
 	const int sig_len = strlen(FMAP_SIGNATURE);
@@ -222,11 +228,11 @@ static int fmap_bsearch_rom(struct fmap **fmap_out, struct flashctx *const flash
 				continue;
 			if (offset == 0 && !check_offset_0)
 				continue;
-			check_offset_0 = 0;
+			check_offset_0 = false;
 
 			/* Read errors are considered non-fatal since we may
 			 * encounter locked regions and want to continue. */
-			if (flashctx->chip->read(flashctx, (uint8_t *)fmap, offset, sig_len)) {
+			if (read_flash(flashctx, (uint8_t *)fmap, offset, sig_len)) {
 				/*
 				 * Print in verbose mode only to avoid excessive
 				 * messages for benign errors. Subsequent error
@@ -239,7 +245,7 @@ static int fmap_bsearch_rom(struct fmap **fmap_out, struct flashctx *const flash
 			if (memcmp(fmap, FMAP_SIGNATURE, sig_len) != 0)
 				continue;
 
-			if (flashctx->chip->read(flashctx, (uint8_t *)fmap + sig_len,
+			if (read_flash(flashctx, (uint8_t *)fmap + sig_len,
 						offset + sig_len, sizeof(*fmap) - sig_len)) {
 				msg_cerr("Cannot read %zu bytes at offset %06zx\n",
 						sizeof(*fmap) - sig_len, offset + sig_len);
@@ -248,7 +254,7 @@ static int fmap_bsearch_rom(struct fmap **fmap_out, struct flashctx *const flash
 
 			if (is_valid_fmap(fmap)) {
 				msg_gdbg("fmap found at offset 0x%06zx\n", offset);
-				fmap_found = 1;
+				fmap_found = true;
 				break;
 			}
 			msg_gerr("fmap signature found at %zu but header is invalid.\n", offset);
@@ -271,7 +277,7 @@ static int fmap_bsearch_rom(struct fmap **fmap_out, struct flashctx *const flash
 		goto _free_ret;
 	}
 
-	if (flashctx->chip->read(flashctx, (uint8_t *)fmap + sizeof(*fmap),
+	if (read_flash(flashctx, (uint8_t *)fmap + sizeof(*fmap),
 				offset + sizeof(*fmap), fmap_len - sizeof(*fmap))) {
 		msg_cerr("Cannot read %zu bytes at offset %06zx\n",
 				fmap_len - sizeof(*fmap), offset + sizeof(*fmap));

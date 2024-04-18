@@ -14,8 +14,7 @@
  * GNU General Public License for more details.
  */
 
-#if CONFIG_FT2232_SPI == 1
-
+#include <stdbool.h>
 #include <stdio.h>
 #include <strings.h>
 #include <string.h>
@@ -38,8 +37,10 @@
 #define FTDI_FT2232H_PID	0x6010
 #define FTDI_FT4232H_PID	0x6011
 #define FTDI_FT232H_PID		0x6014
+#define FTDI_FT4233H_PID	0x6041
 #define TIAO_TUMPA_PID		0x8a98
 #define TIAO_TUMPA_LITE_PID	0x8a99
+#define KT_LINK_PID		0xbbe2
 #define AMONTEC_JTAGKEY_PID	0xCFF8
 
 #define GOEPEL_VID		0x096C
@@ -63,8 +64,10 @@ static const struct dev_entry devs_ft2232spi[] = {
 	{FTDI_VID, FTDI_FT2232H_PID, OK, "FTDI", "FT2232H"},
 	{FTDI_VID, FTDI_FT4232H_PID, OK, "FTDI", "FT4232H"},
 	{FTDI_VID, FTDI_FT232H_PID, OK, "FTDI", "FT232H"},
+	{FTDI_VID, FTDI_FT4233H_PID, OK, "FTDI", "FT4233H"},
 	{FTDI_VID, TIAO_TUMPA_PID, OK, "TIAO", "USB Multi-Protocol Adapter"},
 	{FTDI_VID, TIAO_TUMPA_LITE_PID, OK, "TIAO", "USB Multi-Protocol Adapter Lite"},
+	{FTDI_VID, KT_LINK_PID, OK, "Kristech", "KT-LINK"},
 	{FTDI_VID, AMONTEC_JTAGKEY_PID, OK, "Amontec", "JTAGkey"},
 	{GOEPEL_VID, GOEPEL_PICOTAP_PID, OK, "GOEPEL", "PicoTAP"},
 	{GOOGLE_VID, GOOGLE_SERVO_PID, OK, "Google", "Servo"},
@@ -91,8 +94,12 @@ static const struct dev_entry devs_ft2232spi[] = {
  * "set data bits low byte" MPSSE command that sets the initial
  * state and the direction of the I/O pins. `cs_bits` pins default
  * to high and will be toggled during SPI transactions. All other
- * output pins will be kept low all the time. On exit, all pins
- * will be reconfigured as inputs.
+ * output pins will be kept low all the time. For some programmers,
+ * some reserved GPIOL* pins are used as outputs. Free GPIOL* pins
+ * are configured as inputs, while it's possible to use them either
+ * as generic gpios or as additional CS# signal(s) through the
+ * parameter(s) `gpiolX`. On exit, all pins will be reconfigured
+ * as inputs.
  *
  * The pin offsets are as follows:
  * TCK/SK is bit 0.
@@ -111,6 +118,7 @@ static const struct dev_entry devs_ft2232spi[] = {
  */
 struct ft2232_data {
 	uint8_t cs_bits;
+	uint8_t aux_bits;
 	uint8_t pindir;
 	struct ftdi_context ftdic_context;
 };
@@ -232,7 +240,8 @@ static int ft2232_spi_send_multicommand(const struct flashctx *flash, struct spi
 
 		msg_pspew("Assert CS#\n");
 		buf[i++] = SET_BITS_LOW;
-		buf[i++] = 0; /* assert CS# pins, all other output pins stay low */
+		/* assert CS# pins, keep aux_bits, all other output pins stay low */
+		buf[i++] = spi_data->aux_bits;
 		buf[i++] = spi_data->pindir;
 
 		/* WREN, OP(PROGRAM, ERASE), ADDR, DATA */
@@ -254,7 +263,7 @@ static int ft2232_spi_send_multicommand(const struct flashctx *flash, struct spi
 		/* Add final de-assert CS# */
 		msg_pspew("De-assert CS#\n");
 		buf[i++] = SET_BITS_LOW;
-		buf[i++] = spi_data->cs_bits;
+		buf[i++] = spi_data->cs_bits | spi_data->aux_bits;
 		buf[i++] = spi_data->pindir;
 
 		/* continue if there is no read-cmd and further cmds exist */
@@ -286,16 +295,14 @@ static const struct spi_master spi_master_ft2232 = {
 	.features	= SPI_MASTER_4BA,
 	.max_data_read	= 64 * 1024,
 	.max_data_write	= 256,
-	.command	= default_spi_send_command,
 	.multicommand	= ft2232_spi_send_multicommand,
 	.read		= default_spi_read,
 	.write_256	= default_spi_write_256,
-	.write_aai	= default_spi_write_aai,
 	.shutdown	= ft2232_shutdown,
 };
 
 /* Returns 0 upon success, a negative number upon errors. */
-static int ft2232_spi_init(void)
+static int ft2232_spi_init(const struct programmer_cfg *cfg)
 {
 	int ret = 0;
 	unsigned char buf[512];
@@ -308,7 +315,7 @@ static int ft2232_spi_init(void)
 	 * but the non-H chips can only run at 12 MHz. We disable the divide-by-5
 	 * prescaler on 'H' chips so they run at 60MHz.
 	 */
-	uint8_t clock_5x = 1;
+	bool clock_5x = true;
 	/* In addition to the prescaler mentioned above there is also another
 	 * configurable one on all versions of the chips. Its divisor div can be
 	 * set by a 16 bit value x according to the following formula:
@@ -324,11 +331,14 @@ static int ft2232_spi_init(void)
 	double mpsse_clk;
 
 	uint8_t cs_bits = 0x08;
+	uint8_t aux_bits = 0x00;
 	uint8_t pindir = 0x0b;
+	uint8_t aux_bits_high = 0x00;
+	uint8_t pindir_high = 0x00;
 	struct ftdi_context ftdic;
 	struct ft2232_data *spi_data;
 
-	arg = extract_programmer_param("type");
+	arg = extract_programmer_param_str(cfg, "type");
 	if (arg) {
 		if (!strcasecmp(arg, "2232H")) {
 			ft2232_type = FTDI_FT2232H_PID;
@@ -339,6 +349,9 @@ static int ft2232_spi_init(void)
 		} else if (!strcasecmp(arg, "232H")) {
 			ft2232_type = FTDI_FT232H_PID;
 			channel_count = 1;
+		} else if (!strcasecmp(arg, "4233H")) {
+			ft2232_type = FTDI_FT4233H_PID;
+			channel_count = 4;
 		} else if (!strcasecmp(arg, "jtagkey")) {
 			ft2232_type = AMONTEC_JTAGKEY_PID;
 			channel_count = 2;
@@ -410,6 +423,17 @@ static int ft2232_spi_init(void)
 			/* Flyswatter and Flyswatter-2 require GPIO bits 0x80
 			 * and 0x40 to be driven low to enable output buffers */
 			pindir = 0xcb;
+		} else if (!strcasecmp(arg, "kt-link")) {
+			ft2232_type = KT_LINK_PID;
+			/* port B is used as uart */
+			channel_count = 1;
+			/* Set GPIOL1 output high - route TMS and TDO through multiplexers */
+			aux_bits = 0x20;
+			pindir = 0x2b;
+			/* Set GPIOH4 output low - enable TMS output buffer */
+			/* Set GPIOH5 output low - enable TDI output buffer */
+			/* Set GPIOH6 output low - enable TCK output buffer */
+			pindir_high = 0x70;
 		} else {
 			msg_perr("Error: Invalid device type specified.\n");
 			free(arg);
@@ -418,7 +442,10 @@ static int ft2232_spi_init(void)
 	}
 	free(arg);
 
-	arg = extract_programmer_param("port");
+	/* Remember reserved pins before pindir gets modified. */
+	const uint8_t rsv_bits = pindir & 0xf0;
+
+	arg = extract_programmer_param_str(cfg, "port");
 	if (arg) {
 		switch (toupper((unsigned char)*arg)) {
 		case 'A':
@@ -451,7 +478,7 @@ static int ft2232_spi_init(void)
 	}
 	free(arg);
 
-	arg = extract_programmer_param("divisor");
+	arg = extract_programmer_param_str(cfg, "divisor");
 	if (arg && strlen(arg)) {
 		unsigned int temp = 0;
 		char *endptr;
@@ -466,8 +493,13 @@ static int ft2232_spi_init(void)
 	}
 	free(arg);
 
-	arg = extract_programmer_param("csgpiol");
+	bool csgpiol_set = false;
+	arg = extract_programmer_param_str(cfg, "csgpiol");
 	if (arg) {
+		csgpiol_set = true;
+		msg_pwarn("Deprecation warning: `csgpiol` is deprecated and will be removed "
+			 "in the future.\nUse `gpiolX=C` instead.\n");
+
 		char *endptr;
 		unsigned int temp = strtoul(arg, &endptr, 10);
 		if (*endptr || endptr == arg || temp > 3) {
@@ -476,11 +508,80 @@ static int ft2232_spi_init(void)
 			free(arg);
 			return -2;
 		}
+
 		unsigned int pin = temp + 4;
+		if (rsv_bits & 1 << pin) {
+			msg_perr("Error: Invalid GPIOL specified: \"%s\".\n"
+				 "The pin is reserved on this programmer.\n",
+				 arg);
+			free(arg);
+			return -2;
+		}
+
 		cs_bits |= 1 << pin;
-		pindir |= 1 << pin;
+		pindir  |= 1 << pin;
 	}
 	free(arg);
+
+	/* gpiolX */
+	for (int pin = 0; pin < 4; pin++) {
+		char gpiol_param[7];
+		snprintf(gpiol_param, sizeof(gpiol_param), "gpiol%d", pin);
+		arg = extract_programmer_param_str(cfg, gpiol_param);
+
+		if (!arg)
+			continue;
+
+		if (csgpiol_set) {
+			msg_perr("Error: `csgpiol` and `gpiolX` are mutually exclusive.\n"
+				 "Since `csgpiol` is deprecated and will be removed in the "
+				 "future, use of `gpiolX=C` is recommended.\n");
+			free(arg);
+			return -2;
+		}
+
+		uint8_t bit = 1 << (pin + 4);
+		if (rsv_bits & bit) {
+			msg_perr("Error: Invalid GPIOL specified: \"gpiol%d=%s\".\n"
+				 "Pin GPIOL%i is reserved on this programmer.\n",
+				 pin, arg, pin);
+			free(arg);
+			return -2;
+		}
+
+		if (strlen(arg) != 1)
+			goto format_error;
+
+		switch (toupper(arg[0])) {
+			case 'H':
+				aux_bits |= bit;
+				pindir   |= bit;
+				break;
+			case 'L':
+				pindir   |= bit;
+				break;
+			case 'C':
+				cs_bits  |= bit;
+				pindir   |= bit;
+				break;
+			default:
+				goto format_error;
+		}
+
+		free(arg);
+		continue;
+
+format_error:
+		msg_perr("Error: Invalid GPIOL specified: \"gpiol%d=%s\".\n"
+			 "Valid values are H, L and C.\n"
+			 "    H - Set GPIOL output high\n"
+			 "    L - Set GPIOL output low\n"
+			 "    C - Use GPIOL as additional CS# output\n",
+			 pin, arg);
+
+		free(arg);
+		return -2;
+	}
 
 	msg_pdbg("Using device type %s %s ",
 		 get_ft2232_vendorname(ft2232_vid, ft2232_type),
@@ -499,8 +600,8 @@ static int ft2232_spi_init(void)
 		msg_perr("Unable to select channel (%s).\n", ftdi_get_error_string(&ftdic));
 	}
 
-	arg = extract_programmer_param("serial");
-	arg2 = extract_programmer_param("description");
+	arg = extract_programmer_param_str(cfg, "serial");
+	arg2 = extract_programmer_param_str(cfg, "description");
 
 	f = ftdi_usb_open_desc(&ftdic, ft2232_vid, ft2232_type, arg2, arg);
 
@@ -515,7 +616,7 @@ static int ft2232_spi_init(void)
 
 	if (ftdic.type != TYPE_2232H && ftdic.type != TYPE_4232H && ftdic.type != TYPE_232H) {
 		msg_pdbg("FTDI chip type %d is not high-speed.\n", ftdic.type);
-		clock_5x = 0;
+		clock_5x = false;
 	}
 
 	if (ftdi_usb_reset(&ftdic) < 0) {
@@ -564,11 +665,22 @@ static int ft2232_spi_init(void)
 
 	msg_pdbg("Set data bits\n");
 	buf[0] = SET_BITS_LOW;
-	buf[1] = cs_bits;
+	buf[1] = cs_bits | aux_bits;
 	buf[2] = pindir;
 	if (send_buf(&ftdic, buf, 3)) {
 		ret = -8;
 		goto ftdi_err;
+	}
+
+	if (pindir_high) {
+		msg_pdbg("Set data bits HighByte\n");
+		buf[0] = SET_BITS_HIGH;
+		buf[1] = aux_bits_high;
+		buf[2] = pindir_high;
+		if (send_buf(&ftdic, buf, 3)) {
+			ret = -8;
+			goto ftdi_err;
+		}
 	}
 
 	spi_data = calloc(1, sizeof(*spi_data));
@@ -577,6 +689,7 @@ static int ft2232_spi_init(void)
 		return SPI_GENERIC_ERROR;
 	}
 	spi_data->cs_bits = cs_bits;
+	spi_data->aux_bits = aux_bits;
 	spi_data->pindir = pindir;
 	spi_data->ftdic_context = ftdic;
 
@@ -595,8 +708,4 @@ const struct programmer_entry programmer_ft2232_spi = {
 	.type			= USB,
 	.devs.dev		= devs_ft2232spi,
 	.init			= ft2232_spi_init,
-	.map_flash_region	= fallback_map,
-	.unmap_flash_region	= fallback_unmap,
-	.delay			= internal_delay,
 };
-#endif

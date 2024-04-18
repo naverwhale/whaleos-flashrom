@@ -14,12 +14,11 @@
  * GNU General Public License for more details.
  */
 
-#if defined(__i386__) || defined(__x86_64__)
-
 #include <stdlib.h>
 #include "flash.h"
 #include "programmer.h"
-#include "hwaccess.h"
+#include "hwaccess_x86_io.h"
+#include "platform/pci.h"
 
 #define BIOS_ROM_ADDR		0x04
 #define BIOS_ROM_DATA		0x08
@@ -41,7 +40,7 @@ static const struct dev_entry nics_3com[] = {
 	{0x10b7, 0x9001, NT, "3COM", "3C90xB: PCI 10/100 Mbps; shared 10BASE-T/100BASE-T4" },
 	{0x10b7, 0x9004, OK, "3COM", "3C90xB: PCI 10BASE-T (TPO)" },
 	{0x10b7, 0x9005, NT, "3COM", "3C90xB: PCI 10BASE-T/10BASE2/AUI (COMBO)" },
-	{0x10b7, 0x9006, NT, "3COM", "3C90xB: PCI 10BASE-T/10BASE2 (TPC)" },
+	{0x10b7, 0x9006, OK, "3COM", "3C90xB: PCI 10BASE-T/10BASE2 (TPC)" },
 	{0x10b7, 0x900a, NT, "3COM", "3C90xB: PCI 10BASE-FL" },
 	{0x10b7, 0x905a, NT, "3COM", "3C90xB: PCI 10BASE-FX" },
 	{0x10b7, 0x9058, OK, "3COM", "3C905B: Cyclone 10/100/BNC" },
@@ -91,18 +90,12 @@ static int nic3com_shutdown(void *par_data)
 }
 
 static const struct par_master par_master_nic3com = {
-		.chip_readb		= nic3com_chip_readb,
-		.chip_readw		= fallback_chip_readw,
-		.chip_readl		= fallback_chip_readl,
-		.chip_readn		= fallback_chip_readn,
-		.chip_writeb		= nic3com_chip_writeb,
-		.chip_writew		= fallback_chip_writew,
-		.chip_writel		= fallback_chip_writel,
-		.chip_writen		= fallback_chip_writen,
-		.shutdown		= nic3com_shutdown,
+	.chip_readb	= nic3com_chip_readb,
+	.chip_writeb	= nic3com_chip_writeb,
+	.shutdown	= nic3com_shutdown,
 };
 
-static int nic3com_init(void)
+static int nic3com_init(const struct programmer_cfg *cfg)
 {
 	struct pci_dev *dev = NULL;
 	uint32_t io_base_addr = 0;
@@ -112,7 +105,7 @@ static int nic3com_init(void)
 	if (rget_io_perms())
 		return 1;
 
-	dev = pcidev_init(nics_3com, PCI_BASE_ADDRESS_0);
+	dev = pcidev_init(cfg, nics_3com, PCI_BASE_ADDRESS_0);
 	if (!dev)
 		return 1;
 
@@ -169,11 +162,4 @@ const struct programmer_entry programmer_nic3com = {
 	.type			= PCI,
 	.devs.dev		= nics_3com,
 	.init			= nic3com_init,
-	.map_flash_region	= fallback_map,
-	.unmap_flash_region	= fallback_unmap,
-	.delay			= internal_delay,
 };
-
-#else
-#error PCI port I/O access is not supported on this architecture yet.
-#endif
